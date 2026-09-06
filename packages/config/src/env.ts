@@ -71,6 +71,17 @@ export const envSchema = z.object({
   AUTH_SECRET: base64Secret,
   SESSION_TTL_SECONDS: z.coerce.number().int().min(60).default(2592000),
 
+  /*
+   * Provider keys — DEVELOPMENT ONLY.
+   *
+   * These are instance-wide, so every organization shares them. Phase 4
+   * replaces this with per-organization encrypted credentials; until then a
+   * multi-tenant deployment must not rely on them.
+   */
+  ANTHROPIC_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+
   STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
   STORAGE_LOCAL_PATH: z.string().default('./local/storage'),
 });

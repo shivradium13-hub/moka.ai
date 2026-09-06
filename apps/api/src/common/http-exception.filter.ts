@@ -1,6 +1,7 @@
 import { Catch, HttpException, type ArgumentsHost, type ExceptionFilter } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { AppError, ErrorCode, toAppError, redactValue } from '@moka/core';
+import { ProviderError, ProviderErrorCode } from '@moka/ai';
 import { getLogger } from './logger.js';
 
 /**
@@ -63,6 +64,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
    */
   private normalise(exception: unknown): AppError {
     if (exception instanceof AppError) return exception;
+    if (exception instanceof ProviderError) return this.fromProviderError(exception);
 
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
@@ -82,6 +84,52 @@ export class HttpExceptionFilter implements ExceptionFilter {
     }
 
     return toAppError(exception);
+  }
+
+  /**
+   * Map a normalised provider failure onto an HTTP response.
+   *
+   * Only `publicMessage` crosses the boundary — a provider's own error text
+   * can quote the request that caused it. The status distinguishes the three
+   * cases a caller can act on: their request is wrong (4xx), they are being
+   * throttled (429), or the platform's provider configuration is at fault
+   * (5xx), which is not something retrying differently will fix.
+   */
+  private fromProviderError(error: ProviderError): AppError {
+    const STATUS: Record<string, number> = {
+      [ProviderErrorCode.INVALID_REQUEST]: 400,
+      [ProviderErrorCode.CONTEXT_LENGTH]: 400,
+      [ProviderErrorCode.CONTENT_FILTERED]: 422,
+      [ProviderErrorCode.RATE_LIMITED]: 429,
+      [ProviderErrorCode.AUTHENTICATION]: 502,
+      [ProviderErrorCode.UNKNOWN]: 502,
+      [ProviderErrorCode.NO_CREDENTIAL]: 503,
+      [ProviderErrorCode.UNAVAILABLE]: 503,
+    };
+
+    const httpStatus = STATUS[error.code] ?? 502;
+
+    // A throttled provider is reported as RATE_LIMITED so clients with generic
+    // 429 retry handling react correctly without special-casing providers.
+    const code =
+      error.code === ProviderErrorCode.RATE_LIMITED
+        ? ErrorCode.RATE_LIMITED
+        : ErrorCode.PROVIDER_ERROR;
+
+    return new AppError({
+      code,
+      httpStatus,
+      publicMessage: error.publicMessage,
+      details: {
+        providerCode: error.code,
+        provider: error.providerId,
+        retryable: error.retryable,
+        ...(error.modelId ? { model: error.modelId } : {}),
+        ...(error.retryAfterMs ? { retryAfterSeconds: Math.ceil(error.retryAfterMs / 1000) } : {}),
+      },
+      internalMessage: error.message,
+      cause: error,
+    });
   }
 
   private codeForStatus(status: number): ErrorCode {

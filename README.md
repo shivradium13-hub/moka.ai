@@ -5,17 +5,22 @@ Multi-tenant AI workspace and AI workforce platform.
 > **Standalone product.** MOKA AI shares no code, data, users, APIs, business
 > logic, branding or configuration with any other product.
 
-**Status: Phase 2 (Knowledge Engine) complete apart from its vector half.**
+**Status: Phase 3 (AI Gateway) complete.** Phases 1–3 delivered:
 
-Phase 1 delivered authentication, organizations, multi-tenancy, RBAC and
-auditing. Phase 2 adds document ingestion (PDF, DOCX, Markdown, HTML, CSV,
-JSON, text), chunking, and **full-text retrieval with RRF fusion**.
+- **Phase 1** — authentication, organizations, multi-tenancy, RBAC, auditing
+- **Phase 2** — document ingestion, chunking, full-text retrieval with RRF fusion
+- **Phase 3** — provider-agnostic AI gateway, model router, usage ledger, SSRF-guarded egress
 
-**Semantic (vector) search is not running**: it needs the pgvector extension,
-which is not installable on the current machine without a decision that is the
-operator's to make (see [docs/roadmap.md](docs/roadmap.md) §B1). The API and UI
-both say so plainly rather than returning quietly worse results. No AI model
-calls exist yet — that is Phase 3.
+Two things are deliberately not working, and the code says so rather than
+pretending otherwise:
+
+- **Semantic (vector) search** needs the pgvector extension, which is not
+  installable here without an operator decision ([roadmap](docs/roadmap.md) §B1).
+  Retrieval is lexical, and the UI states that.
+- **No AI provider API key exists in this environment**, so no live model call
+  has ever been made. `GET /v1/ai/models` reports every model as unavailable.
+  The adapters are written to the documented contracts and tested against
+  fixtures of those contracts, not against the providers themselves.
 
 ---
 
@@ -94,6 +99,8 @@ apps/
 packages/
   core/      Domain types, typed errors, RBAC, redaction.
   knowledge/ Parsers, chunking, retrieval, storage driver.
+  ai/        Provider adapters, model registry, router, cost accounting.
+  net/       safeFetch — the single SSRF-guarded egress point.
   config/    Zod-validated environment loader.
   crypto/    Envelope encryption, Argon2id, token hashing.
   db/        Drizzle schema, SQL migrations, RLS policies, seeds.
@@ -121,6 +128,24 @@ the same fusion call as a third list.
 Ingestion runs **inline** in the request today (bounded by a 25 MB cap) because
 the intended BullMQ queue needs Valkey, which needs Docker. The document status
 column already models the async lifecycle.
+
+---
+
+## AI Gateway
+
+Requests go `router → credential → adapter → provider`. The router picks a
+model from required capabilities and plans fallbacks; only transient failures
+walk the plan, because retrying a malformed request elsewhere just buys the
+same error twice.
+
+Every call writes a `usage_records` row — failures included, since a failed
+call still consumed provider quota. Cost is stored as **integer
+micro-dollars**, and `NULL` where pricing is unknown. `NULL` means unknown, not
+free: token counts stay authoritative so cost can be backfilled.
+
+All outbound traffic goes through `safeFetch`, which validates the address in
+the connection path itself rather than before it — checking a hostname and then
+letting `fetch` re-resolve it is a DNS-rebinding hole.
 
 ---
 

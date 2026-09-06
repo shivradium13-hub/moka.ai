@@ -1,7 +1,9 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 2 (Knowledge Engine) COMPLETE except for its vector half,**
-> which is blocked on pgvector (§B1). Phase 1 complete. Verified 2026-09-06.
+> **Status: Phase 3 (AI Gateway) COMPLETE — untested against live providers,**
+> which requires API keys this environment does not have. Phase 1 complete;
+> Phase 2 complete except its vector half, blocked on pgvector (§B1).
+> Verified 2026-09-06.
 
 ---
 
@@ -162,6 +164,104 @@ them on the API origin as a path — but rejected now regardless.
 `packages/db/drizzle/_blocked/0004_embeddings.sql` contains the vector schema,
 written but **never executed**. It sits outside the migration sequence so it
 cannot half-apply or apply out of order. It is unverified; review before use.
+
+---
+
+## Phase 3 — completion record (gateway complete; live provider calls unverified)
+
+| Check | Result |
+|---|---|
+| Typecheck | 18/18 tasks, strict, zero errors |
+| Lint | 10/10 packages, **0 errors, 0 warnings** |
+| Unit tests | **365 passed** (net 89, knowledge 100, ai 50, core 39, crypto 32, web 19, config 14, tenancy 13, api 9) |
+| Build | 10/10 |
+| Security suites | 63 passed (unchanged — Phase 3 added no tenant tables beyond `usage_records`) |
+
+### `packages/net` — the SSRF guard, finally built
+
+The ESLint rule banning raw HTTP clients has pointed at `@moka/net` since
+Phase 1, but the package did not exist. It does now, and **89 tests** cover it.
+
+DNS rebinding is defeated properly: validation runs in the undici Agent's
+`lookup` hook, so the address checked is the address connected to, with no
+window in between. The obvious design — resolve, check, then `fetch` — loses
+that race, because `fetch` resolves again.
+
+The test suite is the standard bypass repertoire: IPv4-mapped IPv6
+(`::ffff:169.254.169.254`), decimal/octal/hex encodings, CGNAT, NAT64, ULA,
+link-local, cloud metadata for four providers, and redirect-to-metadata
+verified against a real local server.
+
+**Two real bugs the tests caught:**
+
+1. Mapped IPv6 addresses were blocked only because IPv6 parsing *failed*, not
+   because they were unwrapped — and that also wrongly blocked mapped **public**
+   addresses. Fixed by decoding the dotted-quad tail properly.
+2. Changing `assertSafeUrl` to an options object created a silent footgun: an
+   array structurally satisfies an all-optional type, so `assertSafeUrl(url,
+   ['host'])` compiled and applied **no allowlist**. Now throws, with a
+   regression test.
+
+### The gateway
+
+Provider-agnostic types, a code-based model registry, capability routing with
+fallback, normalised errors, and integer-micro-dollar cost accounting.
+Adapters for Anthropic and OpenAI use the official SDKs.
+
+Adapters are tested against **local servers speaking each provider's documented
+wire format** — request shape, SSE parsing, usage mapping, error normalisation.
+That tests our half; it does not test theirs.
+
+### Honesty about money and capability
+
+- **Anthropic pricing** is real, with a cited source and date.
+- **OpenAI/Google pricing could not be verified here**, so those models carry
+  `pricing: null`, cost reports as `known: false`, and `usage_records.cost_micro_usd`
+  is `NULL` — which means *unknown*, not free. Token counts are still recorded
+  in full so cost can be backfilled. A fabricated dollar figure is worse than a
+  missing one, because people budget against it.
+- `GET /v1/ai/models` reports `available: false` for every provider without a
+  credential, so the UI cannot offer a model that will fail.
+
+### Correct current Anthropic API shape
+
+Taken from the bundled `claude-api` reference rather than memory: adaptive
+thinking (`thinking: {type:'adaptive'}`), `output_config.effort`, and **no
+`budget_tokens`** — which is rejected with a 400 on Opus 5 / Sonnet 5 /
+Fable 5.1 / Opus 4.7+. A test asserts `budget_tokens` never appears in a
+request. The pinned SDK was also far too old (0.68 → 0.124) to type adaptive
+thinking at all.
+
+### Three bugs found during end-to-end verification
+
+1. **`ProviderError` collapsed to a 500.** It is not an `AppError`, so the
+   exception filter's catch-all swallowed it: "no provider configured" returned
+   an opaque 500. Now mapped centrally — 503 for configuration, 502 for
+   upstream auth, 429 for throttling, 400 for bad requests — with the precise
+   normalised cause in `details.providerCode`.
+2. **`code: "INTERNAL"` on a 400.** The machine-readable field contradicted the
+   status. Added `PROVIDER_ERROR`, with throttling still reported as
+   `RATE_LIMITED` so generic 429 retry logic keeps working.
+3. **Streaming reported routing failures as a generic error.** `planRoute` ran
+   outside the generator's `try`, so a "no credential" failure escaped after
+   the SSE headers were already sent. Moved inside; the client now receives
+   `PROVIDER_NO_CREDENTIAL` as a normal stream event.
+
+### What is NOT verified
+
+**No provider API key exists in this environment, so no live call has ever been
+made.** Untested against real providers: authentication, real streaming
+behaviour, rate-limit headers, real token accounting, and refusal handling.
+The adapters are written to the documented contracts and tested against
+fixtures of those contracts — that is the strongest claim available here.
+
+### Deviations
+
+| Planned | Actual | Reason |
+|---|---|---|
+| Gemini adapter | Registered in the catalogue, **adapter not implemented** | Listed as unavailable rather than half-built. Anthropic and OpenAI prove the abstraction; a third adds surface without adding confidence while none can be run. |
+| Per-organization credentials | Instance-wide env vars | Moka Credentials is Phase 4. `CredentialsService.resolve()` already takes a `TenantContext` it does not yet use, so the vault drops in without touching callers. |
+| Usage dashboard UI | API only (`GET /v1/ai/usage`) | Endpoint returns per-model totals plus recent calls, including an `unpricedCalls` count so the UI can say "cost unknown for N calls" instead of under-reporting. |
 
 ---
 

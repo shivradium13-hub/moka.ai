@@ -71,7 +71,9 @@ export default tseslint.config(
   // SECURITY: raw database access is confined to packages/db
   {
     files: ['apps/**/*.ts', 'packages/**/*.ts'],
-    ignores: ['packages/db/**'],
+    // packages/net is exempt from the HTTP-client ban for the same reason as
+    // above: it IS the guarded egress point and must import undici to build it.
+    ignores: ['packages/db/**', 'packages/net/**'],
     rules: {
       'no-restricted-imports': ['error', { paths: [...RESTRICTED_HTTP, ...RESTRICTED_DB] }],
     },

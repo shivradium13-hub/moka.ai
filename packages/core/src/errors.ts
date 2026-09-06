@@ -30,6 +30,13 @@ export const ErrorCode = {
 
   // --- Limits ---
   RATE_LIMITED: 'RATE_LIMITED',
+
+  /**
+   * An upstream AI provider failed. The precise, normalised cause is carried
+   * in `details.providerCode` so a client can branch on it without this
+   * enum having to mirror every provider condition.
+   */
+  PROVIDER_ERROR: 'PROVIDER_ERROR',
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
 
   // --- Configuration / crypto ---
