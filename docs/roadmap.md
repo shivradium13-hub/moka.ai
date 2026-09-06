@@ -1,7 +1,7 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 1 (Foundation) COMPLETE.** Verified on 2026-09-06.
-> Phase 2 is blocked on pgvector (§B1) and awaits approval.
+> **Status: Phase 2 (Knowledge Engine) COMPLETE except for its vector half,**
+> which is blocked on pgvector (§B1). Phase 1 complete. Verified 2026-09-06.
 
 ---
 
@@ -75,6 +75,93 @@ SECURITY` anyway — keeping it would have been a footgun with no purpose.
   tests, but have no UI yet.
 - The Valkey-backed rate limiter is not implemented.
 - Security suites 2, 5, 6, 7, 9, 10 belong to later phases and do not yet exist.
+
+---
+
+## Phase 2 — completion record (partial: text side complete, vector side blocked)
+
+**Gate met.** Security suite 10 (knowledge isolation) passes against real
+PostgreSQL. `pnpm verify` and `pnpm test:security` both pass.
+
+| Check | Result |
+|---|---|
+| Typecheck | 14/14 tasks, strict, zero errors |
+| Lint | 8/8 packages, 0 errors, 0 warnings |
+| Unit tests | **226 passed** (knowledge 100, core 39, crypto 32, web 19, config 14, tenancy 13, api 9) |
+| Build | 8/8 |
+| **Security suites** | **63 passed** — tenant isolation 29, **knowledge isolation 19**, credential exposure 7, RBAC sync 8 |
+
+### What the pgvector blocker did NOT stop
+
+The Phase 0 design put embeddings in their own table keyed by
+`(chunk_id, embedding_model_id)` rather than as a column on the chunk. That
+decision was made so the embedding model would not be baked into the schema —
+and it turned out to mean the entire text side of the Knowledge Engine could
+ship and be tested without pgvector at all.
+
+Delivered and verified:
+
+- **Parsers** for TXT, Markdown, JSON, CSV/TSV, HTML, **PDF** and **DOCX**.
+  PDF and DOCX are tested against real format-conformant fixtures, not text
+  with a misleading extension.
+- **Chunking** that never splits mid-sentence where a boundary exists, carries
+  the heading breadcrumb *inside* the chunk text, never merges across
+  headings, overlaps consecutive chunks, and force-splits pathological input.
+- **Sparse retrieval**, already fused with **RRF** across two real retrievers:
+  `ts_rank_cd` over a generated tsvector, and trigram similarity for typo
+  tolerance. Adding the dense list later is one more entry in the same call.
+- **Storage driver** with server-generated, tenant-prefixed keys.
+- **Ingestion**: validate → store → parse → chunk → index, with SHA-256
+  deduplication.
+- **Knowledge UI**: sources, upload (file and paste), document list, chunk
+  inspector, and a retrieval playground showing which retriever matched at
+  which rank.
+
+### Mutation-tested, again
+
+RLS was disabled on `knowledge_chunks` alone: **9 tests failed**, including a
+trigram search returning another tenant's chunk and a cross-tenant INSERT
+succeeding. Restored, back to 63 passing. The suite is load-bearing.
+
+### Verified end to end against the running stack
+
+- PDF and Markdown ingested through the API → chunked → retrievable
+- Query "how long do I have to request a refund" returned the correct chunk
+  first, with breadcrumb `Refund Policy > Eligibility` and RRF signals
+  `{fulltext: 1, trigram: 1}`
+- Re-uploading identical bytes deduplicated instead of duplicating chunks
+- **Tenant B searching for Tenant A's exact content returned zero chunks**
+- Tenant B reading A's source → 404; uploading into A's source → 404
+- Unsupported file type rejected with the list of accepted formats
+
+### Bug found and fixed during verification
+
+Tenant B opening Tenant A's source page returned **500 instead of 404**.
+`serverApiOrNull` swallowed only 401/403, so the API's correct 404 propagated
+as an unhandled error. No data leaked — the isolation held — but the wrong
+status is both poor UX and a needless signal. Fixed by treating 404 as
+"unavailable" (under RLS a foreign resource *is* genuinely invisible, so 404
+is the right answer), and the predicate was moved into a pure module so it
+could be regression-tested. That test now exists.
+
+Hardening the same module also surfaced that `buildUrl` accepted
+protocol-relative paths (`//host/x`). Not exploitable — concatenation keeps
+them on the API origin as a path — but rejected now regardless.
+
+### Deviations and honest gaps
+
+| Planned | Actual | Reason |
+|---|---|---|
+| Dense retrieval, HNSW, RRF over dense+sparse | Sparse only; `denseAvailable: false` reported everywhere | pgvector unavailable (§B1). The API and UI both state plainly that matching is lexical rather than semantic — never claimed otherwise (§45). |
+| Async ingestion via BullMQ | Runs **inline** in the request | Valkey needs Docker (§B2). Bounded by the 25 MB cap; the status column already models the async lifecycle, and the method is shaped to move behind a queue unchanged. |
+| Multipart upload | Base64 JSON | Multipart arrives with the queue-backed pipeline. Encoded size is checked *before* decoding. |
+| Website crawler with SSRF protection | Not started | Deferred to Phase 2b — it is a security-heavy component and deserved its own pass rather than being rushed alongside the pipeline. |
+| OCR for scanned PDFs | Not implemented | Detected and reported as a warning ("N pages contained no extractable text") rather than silently ingesting an empty document. |
+| `xlsx` support | Not implemented | `exceljs` was not added; CSV covers the tabular case for now. Listed rather than half-built. |
+
+`packages/db/drizzle/_blocked/0004_embeddings.sql` contains the vector schema,
+written but **never executed**. It sits outside the migration sequence so it
+cannot half-apply or apply out of order. It is unverified; review before use.
 
 ---
 

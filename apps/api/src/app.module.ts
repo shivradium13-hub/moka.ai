@@ -5,6 +5,7 @@ import { CommonModule } from './common/common.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
 import { OrganizationsModule } from './modules/organizations/organizations.module.js';
 import { ProjectsModule } from './modules/projects/projects.module.js';
+import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
 import { HealthModule } from './modules/health/health.module.js';
 import { AuthGuard } from './common/guards/auth.guard.js';
 import { TenantGuard } from './common/guards/tenant.guard.js';
@@ -32,6 +33,7 @@ import { HttpExceptionFilter } from './common/http-exception.filter.js';
     AuthModule,
     OrganizationsModule,
     ProjectsModule,
+    KnowledgeModule,
     HealthModule,
   ],
   providers: [

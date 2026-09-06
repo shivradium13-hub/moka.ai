@@ -1,6 +1,7 @@
 export * from './identity.js';
 export * from './projects.js';
 export * from './audit.js';
+export * from './knowledge.js';
 
 /**
  * Tables under Row-Level Security.
@@ -16,6 +17,9 @@ export const RLS_PROTECTED_TABLES: readonly string[] = [
   'invitations',
   'projects',
   'audit_logs',
+  'knowledge_sources',
+  'knowledge_documents',
+  'knowledge_chunks',
 ];
 
 /**

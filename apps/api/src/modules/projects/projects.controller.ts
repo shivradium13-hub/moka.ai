@@ -28,7 +28,14 @@ const updateSchema = z
 
 const idSchema = z.string().uuid();
 
-function parse<T>(schema: z.ZodType<T>, input: unknown): T {
+/**
+ * Validate and narrow.
+ *
+ * Returns `z.output<S>` rather than being generic over a single T: a schema
+ * using `.default()` has different input and output types, and `z.ZodType<T>`
+ * conflates them — which silently infers optional fields as `T | undefined`.
+ */
+function parse<S extends z.ZodTypeAny>(schema: S, input: unknown): z.output<S> {
   const result = schema.safeParse(input);
   if (!result.success) {
     throw new ValidationError({

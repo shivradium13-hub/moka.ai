@@ -1,6 +1,6 @@
 import 'server-only';
 import { cookies } from 'next/headers';
-import { ApiError, buildUrl, parseResponse } from './api-shared';
+import { buildUrl, isUnavailable, parseResponse } from './api-shared';
 
 /**
  * SERVER-side API access.
@@ -35,16 +35,16 @@ export async function serverApi<T>(
 }
 
 /**
- * Returns null on 401/403 rather than throwing, so a page can degrade
- * gracefully when the caller's role does not permit a particular read.
+ * Returns null instead of throwing when a resource is unavailable to the
+ * caller, so a page can degrade gracefully or render its own 404.
+ *
+ * See `isUnavailable` for which statuses count, and why 404 is one of them.
  */
 export async function serverApiOrNull<T>(path: string): Promise<T | null> {
   try {
     return await serverApi<T>(path);
   } catch (error) {
-    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-      return null;
-    }
+    if (isUnavailable(error)) return null;
     throw error;
   }
 }

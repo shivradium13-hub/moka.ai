@@ -5,9 +5,17 @@ Multi-tenant AI workspace and AI workforce platform.
 > **Standalone product.** MOKA AI shares no code, data, users, APIs, business
 > logic, branding or configuration with any other product.
 
-**Status: Phase 1 (Foundation) complete.** Authentication, organizations,
-multi-tenancy, RBAC, auditing and the base UI are implemented and tested.
-No AI functionality exists yet — see [docs/roadmap.md](docs/roadmap.md).
+**Status: Phase 2 (Knowledge Engine) complete apart from its vector half.**
+
+Phase 1 delivered authentication, organizations, multi-tenancy, RBAC and
+auditing. Phase 2 adds document ingestion (PDF, DOCX, Markdown, HTML, CSV,
+JSON, text), chunking, and **full-text retrieval with RRF fusion**.
+
+**Semantic (vector) search is not running**: it needs the pgvector extension,
+which is not installable on the current machine without a decision that is the
+operator's to make (see [docs/roadmap.md](docs/roadmap.md) §B1). The API and UI
+both say so plainly rather than returning quietly worse results. No AI model
+calls exist yet — that is Phase 3.
 
 ---
 
@@ -85,6 +93,7 @@ apps/
   web/       Next.js 15 dashboard.
 packages/
   core/      Domain types, typed errors, RBAC, redaction.
+  knowledge/ Parsers, chunking, retrieval, storage driver.
   config/    Zod-validated environment loader.
   crypto/    Envelope encryption, Argon2id, token hashing.
   db/        Drizzle schema, SQL migrations, RLS policies, seeds.
@@ -93,6 +102,25 @@ infra/db/    Bootstrap SQL and the dev cluster script.
 tests/       Security suites (run against real PostgreSQL).
 docs/        Architecture, security, database, roadmap.
 ```
+
+---
+
+## Knowledge Engine
+
+Upload a document and it is parsed, chunked and indexed immediately. Each chunk
+carries its heading breadcrumb *inside* its text — `Refund Policy > Eligibility`
+— because a retrieved fragment has to be intelligible on its own, which is how
+both the model and the citation UI will see it.
+
+Retrieval currently fuses two lexical retrievers with Reciprocal Rank Fusion:
+PostgreSQL full-text (`ts_rank_cd`) and trigram similarity for typo tolerance.
+RRF uses ordinal rank only, so the two incomparable score scales never have to
+be normalised against each other. When pgvector arrives, dense retrieval joins
+the same fusion call as a third list.
+
+Ingestion runs **inline** in the request today (bounded by a 25 MB cap) because
+the intended BullMQ queue needs Valkey, which needs Docker. The document status
+column already models the async lifecycle.
 
 ---
 

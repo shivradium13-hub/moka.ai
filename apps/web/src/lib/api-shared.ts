@@ -23,6 +23,8 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly requestId?: string,
+    /** Field-level validation detail, where the actionable message usually is. */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -39,6 +41,18 @@ export function buildUrl(path: string): string {
   if (!path.startsWith('/')) {
     throw new Error(`API path must start with "/": ${path}`);
   }
+  /*
+   * Reject protocol-relative paths ("//host/x") and backslashes.
+   *
+   * Concatenating onto API_URL would in fact keep "//host/x" on the API
+   * origin as a path, so this is hardening rather than a fix for a live hole.
+   * But protocol-relative forms are a well-known source of origin confusion —
+   * they become genuinely dangerous the moment such a value reaches a redirect
+   * or a different base — and there is no legitimate API path shaped this way.
+   */
+  if (path.startsWith('//') || path.includes('\\')) {
+    throw new Error(`API path must start with "/" and be origin-relative: ${path}`);
+  }
   return `${API_URL}${path}`;
 }
 
@@ -53,7 +67,23 @@ export async function parseResponse<T>(response: Response): Promise<T> {
       errorBody.error?.code ?? 'UNKNOWN',
       errorBody.error?.message ?? 'Request failed.',
       errorBody.error?.requestId,
+      errorBody.error?.details,
     );
   }
   return body as T;
 }
+
+/**
+ * Statuses that mean "you cannot see this", as opposed to "something broke".
+ *
+ * 404 belongs here: under Row-Level Security a resource owned by another
+ * organization is genuinely invisible, so the API answers 404 rather than 403.
+ * A page that treated only 401/403 as unavailable would turn an ordinary
+ * cross-tenant navigation into an unhandled 500.
+ */
+const UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([401, 403, 404]);
+
+export function isUnavailable(error: unknown): boolean {
+  return error instanceof ApiError && UNAVAILABLE_STATUSES.has(error.status);
+}
+

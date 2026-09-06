@@ -33,7 +33,7 @@ const switchOrgSchema = z.object({
   organizationId: z.string().uuid(),
 });
 
-function parse<T>(schema: z.ZodType<T>, input: unknown): T {
+function parse<S extends z.ZodTypeAny>(schema: S, input: unknown): z.output<S> {
   const result = schema.safeParse(input);
   if (!result.success) {
     throw new ValidationError({

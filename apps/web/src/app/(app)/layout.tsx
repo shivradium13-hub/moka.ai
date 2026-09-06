@@ -12,6 +12,7 @@ interface MeResponse {
 const NAV = [
   { href: '/dashboard', label: 'Dashboard' },
   { href: '/projects', label: 'Projects' },
+  { href: '/knowledge', label: 'Knowledge' },
   { href: '/members', label: 'Members' },
   { href: '/settings', label: 'Settings' },
 ];

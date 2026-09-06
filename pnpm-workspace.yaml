@@ -2,7 +2,15 @@ packages:
   - "apps/*"
   - "packages/*"
 
-# esbuild powers tsup (package builds) and vitest. Its postinstall only places
-# the platform binary. Explicitly approved rather than globally allowing scripts.
 allowBuilds:
+  # canvas is an OPTIONAL native dependency of pdfjs, used only for RENDERING
+  # PDF pages to images. We extract text and never render. It also cannot be
+  # built here: there are no MSVC build tools on this machine
+  # (docs/architecture.md R4). Explicitly refused so installs stay clean and
+  # nobody later "fixes" it by approving a build that would fail anyway.
+  canvas: false
+
+  # esbuild powers tsup (package builds) and vitest. Its postinstall only
+  # places the platform binary. Explicitly approved rather than globally
+  # allowing install scripts.
   esbuild: true
