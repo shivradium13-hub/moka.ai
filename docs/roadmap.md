@@ -1,6 +1,6 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 4 (Moka Credentials) COMPLETE.** Phases 1–4 done, with two
+> **Status: Phase 5 (Agent Engine) COMPLETE.** Phases 1–5 done, with two
 > standing limits: no provider API key exists here, so no live model call has
 > been made; and pgvector is unavailable, so retrieval is lexical (§B1).
 > Verified 2026-09-06.
@@ -335,6 +335,98 @@ per-tenant attribution, quota and revocation.
 | Test connection verified against a live provider | Implemented, **never run successfully** | No API key exists here. The path is exercised: it decrypts, calls the adapter, records the result, and returns a normalised reason. What it does against a real key is unverified. |
 | Per-credential permission scopes | Not implemented | Credential management is gated on `ORG_UPDATE`/`ORG_DELETE`. Finer scoping belongs with the API-key work in Phase 9 rather than being invented now. |
 | Google adapter | Credential type accepted; **no adapter** | Consistent with Phase 3 — a key can be stored, but `describeSource` will report it unusable for chat until the adapter exists. |
+
+---
+
+## Phase 5 — completion record (Agent Engine)
+
+| Check | Result |
+|---|---|
+| Typecheck | 20/20 tasks, strict, zero errors |
+| Lint | 11/11 packages, **0 errors, 0 warnings** |
+| Unit tests | **407 passed** — incl. **42 in `@moka/agents`** |
+| Build | 11/11 |
+| Security suites | 88 passed (agent tables now covered by the RLS suite) |
+
+### The security model, in one sentence
+
+**An agent is a CONSTRAINT on what a user can already do — never a grant.**
+
+Every tool call passes four gates: the tool must exist, be on that agent's
+allowlist, sit within the agent's risk ceiling, **and the INVOKING USER must
+hold the tool's permission**. The fourth is the one that matters and the
+easiest to omit; without it, a viewer runs an admin-configured agent and
+deletes projects they could never delete by hand.
+
+`authorizeToolCall` is pure — no database, no clock, no I/O — so the entire
+authorisation model is one readable function and is exhaustively testable.
+
+### How prompt injection is actually handled
+
+Stated plainly in the code: **prompt injection cannot be prevented at the
+prompt layer.** Delimiters can be imitated; instructions can be argued with.
+Everything in `prompt.ts` raises the cost of a successful injection and none of
+it is the control that stops one.
+
+So the injection suite does not test "the model resisted" — that would be
+testing the model, and it would pass or fail for reasons outside our control.
+Instead **it assumes the injection succeeded completely.** The scripted model
+is fully compromised: it reads a malicious "policy document" and does exactly
+what the document says, calling `delete_project`.
+
+The system holds anyway, at four independent layers:
+
+| The agent is… | Result |
+|---|---|
+| not allowlisted for the tool | denied — `NOT_ON_AGENT_ALLOWLIST` |
+| allowlisted but read-level | denied — `EXCEEDS_AGENT_PERMISSION_LEVEL` |
+| fully permitted, invoked by a **viewer** | denied — `USER_LACKS_PERMISSION` |
+| fully permitted, invoked by an **owner** | **paused for human approval** |
+
+Nothing is deleted in any of the four. Only after a human approves does it run
+— and that approval is consumed, so it authorises exactly one execution.
+
+### Mutation-tested
+
+Gate 4 was deleted from `authorizeToolCall`: **5 tests failed**, including the
+privilege-escalation case in the injection suite. Restored, back to 42 passing.
+The gate is load-bearing, not decorative.
+
+### Verified end to end
+
+- The tool catalogue shows risk and approval requirements **to humans**;
+  models are never told which tools are privileged, because that only helps an
+  injected instruction pick a target
+- Running an agent with no provider credential fails cleanly (503) and the run
+  is still recorded with `PROVIDER_NO_CREDENTIAL`
+- A **member** attempting to grant an agent `delete_project` is refused with an
+  actionable `INSUFFICIENT_PERMISSION` naming the missing permission
+
+### Smaller decisions worth recording
+
+- **Tool outputs are schema-validated too.** A result goes straight back into
+  model context, so an unexpected shape is both a correctness problem and an
+  injection surface. Observations are also size-capped.
+- **Arguments are validated before an approval is requested**, so a human is
+  never asked to authorise a call that could not have run anyway.
+- **Denials are recorded, not just successes.** A refused call is exactly the
+  event worth reviewing later. `tool_executions` is append-only.
+- **Malformed model output is treated as prose**, never as a guessed tool call.
+  Improvising arguments for a privileged operation is the one thing that must
+  not happen.
+- **There is no generic `run_sql` or `fetch_url` tool.** Those turn every
+  downstream control into a matter of trusting the model's judgement.
+- **`max_steps` is a column, not a constant**, because a non-terminating loop
+  is an agent's default failure mode.
+
+### Deviations and gaps
+
+| Planned | Actual | Reason |
+|---|---|---|
+| Agent runtime driven by a real model | Implemented; **never run against a live provider** | No API key here. The loop is verified against a scripted model, which is what made the compromised-model tests possible at all. |
+| Native provider tool-use | JSON convention over the provider-agnostic `chat` | The gateway's `chat` is deliberately provider-neutral. Native tool-use per provider is Phase 5b, and the parse path is conservative in the meantime. |
+| Agent builder wizard (§25) | API + read-only UI with an approval inbox | The approval inbox was the part that could not wait — a paused agent with no way to decide it is useless. The wizard belongs with the business agents in Phase 7. |
+| Agent memory (§15) | Not started | Deliberately deferred; memory is its own design with its own retention and isolation questions. |
 
 ---
 

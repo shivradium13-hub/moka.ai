@@ -5,12 +5,13 @@ Multi-tenant AI workspace and AI workforce platform.
 > **Standalone product.** MOKA AI shares no code, data, users, APIs, business
 > logic, branding or configuration with any other product.
 
-**Status: Phase 4 (Moka Credentials) complete.** Phases 1–4 delivered:
+**Status: Phase 5 (Agent Engine) complete.** Phases 1–5 delivered:
 
 - **Phase 1** — authentication, organizations, multi-tenancy, RBAC, auditing
 - **Phase 2** — document ingestion, chunking, full-text retrieval with RRF fusion
 - **Phase 3** — provider-agnostic AI gateway, model router, usage ledger, SSRF-guarded egress
 - **Phase 4** — per-organization encrypted credential vault with BYOK
+- **Phase 5** — agent runtime, typed tools, permission gates, human approvals
 
 Two things are deliberately not working, and the code says so rather than
 pretending otherwise:
@@ -100,6 +101,7 @@ apps/
 packages/
   core/      Domain types, typed errors, RBAC, redaction.
   knowledge/ Parsers, chunking, retrieval, storage driver.
+  agents/    Tool contracts, authorization, prompt isolation, runtime.
   ai/        Provider adapters, model registry, router, cost accounting.
   net/       safeFetch — the single SSRF-guarded egress point.
   config/    Zod-validated environment loader.
@@ -147,6 +149,25 @@ free: token counts stay authoritative so cost can be backfilled.
 All outbound traffic goes through `safeFetch`, which validates the address in
 the connection path itself rather than before it — checking a hostname and then
 letting `fetch` re-resolve it is a DNS-rebinding hole.
+
+---
+
+## Agents
+
+**An agent is a constraint on what a user can already do — never a grant.**
+
+Every tool call passes four gates: the tool exists, it is on that agent's
+allowlist, its risk is within the agent's ceiling, and **the invoking user
+holds the tool's permission**. The last one is what stops an agent becoming a
+privilege-escalation path.
+
+Prompt injection is handled honestly. It cannot be prevented at the prompt
+layer — delimiters can be imitated and instructions argued with. So the test
+suite assumes the injection *succeeded*: a scripted model reads a malicious
+document and does exactly what it says. Nothing is deleted, because
+authorisation depends on the caller's role and the agent's allowlist, neither
+of which is reachable from any prompt. Consequential actions then pause for a
+human, and that approval authorises exactly one execution.
 
 ---
 

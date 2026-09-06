@@ -4,6 +4,7 @@ export * from './audit.js';
 export * from './knowledge.js';
 export * from './usage.js';
 export * from './credentials.js';
+export * from './agents.js';
 
 /**
  * Tables under Row-Level Security.
@@ -24,6 +25,11 @@ export const RLS_PROTECTED_TABLES: readonly string[] = [
   'knowledge_chunks',
   'usage_records',
   'credentials',
+  'agents',
+  'agent_tools',
+  'agent_runs',
+  'approvals',
+  'tool_executions',
 ];
 
 /**
