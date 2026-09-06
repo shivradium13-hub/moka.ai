@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# environment — NEVER commit real secrets
+.env
+.env.*
+!.env.example
+
+# turbo
+.turbo/
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# test / coverage
+coverage/
+.vitest/
+
+# local data
+/tmp/
+/local/
+*.local
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# secrets & keys (defence in depth — these should never exist in-repo)
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/

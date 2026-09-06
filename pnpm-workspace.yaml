@@ -1,0 +1,8 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# esbuild powers tsup (package builds) and vitest. Its postinstall only places
+# the platform binary. Explicitly approved rather than globally allowing scripts.
+allowBuilds:
+  esbuild: true

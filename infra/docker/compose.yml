@@ -1,0 +1,79 @@
+# =============================================================================
+# MOKA AI — local infrastructure
+#
+# OPTIONAL for Phase 1. Docker is not installed on the current development
+# machine (Windows 11 Home, no WSL2), so the supported local path is
+# `node infra/db/dev-cluster.mjs init`, which needs no container runtime.
+#
+# This file is what Phase 2 onward will use, because pgvector is far easier to
+# obtain from the official image than to build against a native Windows
+# PostgreSQL. See docs/roadmap.md §B1.
+#
+# Usage once Docker is available:
+#   docker compose -f infra/docker/compose.yml up -d
+# =============================================================================
+
+name: moka-ai
+
+services:
+  # PostgreSQL 17 with pgvector preinstalled — this is the reason the compose
+  # file exists. Phase 2 (Knowledge Engine) cannot start without the extension.
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: moka-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      # Development only. Production credentials never live in a compose file.
+      POSTGRES_PASSWORD: moka_dev_superuser
+      POSTGRES_DB: postgres
+    ports:
+      # Deliberately NOT 5432: this machine already runs a PostgreSQL 17
+      # service on the default port, and silently shadowing it would be worse
+      # than a port clash.
+      - '127.0.0.1:55432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # bootstrap.sql is mounted alongside so the wrapper can \i it, keeping
+      # one source of truth for roles, grants and extensions.
+      - ../db:/moka-db:ro
+      # Applied automatically on FIRST start of an empty data volume.
+      - ../db/bootstrap-docker.sql:/docker-entrypoint-initdb.d/01-bootstrap.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # This machine has 7.3 GB of RAM total (docs/architecture.md R1). Left
+    # uncapped, PostgreSQL plus the browser agent plus a local embedding model
+    # will contend badly.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # Valkey (BSD-3), not Redis: Redis ≥7.4 is RSALv2/SSPL, which is
+  # source-available rather than open source. Wire-compatible, so every Redis
+  # client and BullMQ work unchanged. See docs/architecture.md §2.
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: moka-valkey
+    restart: unless-stopped
+    command: ['valkey-server', '--save', '60', '1', '--appendonly', 'no']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+volumes:
+  postgres_data:
+  valkey_data:

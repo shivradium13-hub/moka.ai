@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "noEmit": true,
+    "types": ["node"],
+
+    // NestJS runs as CommonJS. `node10` resolution is used deliberately
+    // instead of NodeNext: the workspace packages ship dual ESM/CJS type
+    // declarations, and NodeNext resolves drizzle-orm's types twice (once per
+    // condition), producing two incompatible identities for the same class.
+    // node10 ignores conditional exports and resolves each package once.
+    "module": "commonjs",
+    "moduleResolution": "node10"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
