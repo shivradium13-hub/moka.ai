@@ -1,8 +1,8 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 3 (AI Gateway) COMPLETE — untested against live providers,**
-> which requires API keys this environment does not have. Phase 1 complete;
-> Phase 2 complete except its vector half, blocked on pgvector (§B1).
+> **Status: Phase 4 (Moka Credentials) COMPLETE.** Phases 1–4 done, with two
+> standing limits: no provider API key exists here, so no live model call has
+> been made; and pgvector is unavailable, so retrieval is lexical (§B1).
 > Verified 2026-09-06.
 
 ---
@@ -262,6 +262,79 @@ fixtures of those contracts — that is the strongest claim available here.
 | Gemini adapter | Registered in the catalogue, **adapter not implemented** | Listed as unavailable rather than half-built. Anthropic and OpenAI prove the abstraction; a third adds surface without adding confidence while none can be run. |
 | Per-organization credentials | Instance-wide env vars | Moka Credentials is Phase 4. `CredentialsService.resolve()` already takes a `TenantContext` it does not yet use, so the vault drops in without touching callers. |
 | Usage dashboard UI | API only (`GET /v1/ai/usage`) | Endpoint returns per-model totals plus recent calls, including an `unpricedCalls` count so the UI can say "cost unknown for N calls" instead of under-reporting. |
+
+---
+
+## Phase 4 — completion record (Moka Credentials)
+
+| Check | Result |
+|---|---|
+| Typecheck | 18/18 tasks, strict, zero errors |
+| Lint | 10/10 packages, **0 errors, 0 warnings** |
+| Unit tests | 365 passed |
+| Build | 10/10 |
+| **Security suites** | **88 passed** — incl. **credential vault 25** |
+
+### The design decision that carries the phase
+
+`credentials.id` has **no database default**. The ciphertext's AES-GCM
+Additional Authenticated Data binds it to
+`(organization_id, credential_id, provider_id)`, so the id must exist *before*
+the secret is encrypted — a generated default would mean encrypting against an
+id we do not yet know.
+
+That binding is what makes database tampering fail closed. An attacker with
+**write** access to Postgres still cannot read another tenant's key, because
+moving the ciphertext invalidates it. Four tests cover each axis, plus one that
+performs the whole attack: physically copying Tenant A's encrypted bytes into a
+row Tenant B owns, then trying to decrypt as Tenant B. It fails — the
+cryptography refuses, not an application check.
+
+### Verified end to end against the running stack
+
+- Storing a key returns only `fingerprint`, `lastFour`, and status
+- **The plaintext appears nowhere**: not in any database column, not in the
+  audit log, not in the API log, not in the rendered HTML
+- The audit trail records `providerId`, `name`, `fingerprint`, `lastFour` — and
+  nothing else
+- Adding a key flips `anthropic` to available; **revoking it flips availability
+  straight back to empty**
+- Revocation is one-way; re-enabling returns 409
+- Tenant B sees no credentials, no providers, and gets 404 revoking Tenant A's key
+- A duplicate key is rejected by fingerprint, without confirming the stored value
+
+### Precedence, and why that order
+
+Vault credentials **beat** environment variables. The reverse would mean an
+operator's stray `ANTHROPIC_API_KEY` silently overriding every tenant's own key
+and billing all their traffic to the instance owner. The env fallback is also
+refused outright in production: one shared key across tenants defeats
+per-tenant attribution, quota and revocation.
+
+### Smaller decisions worth recording
+
+- **The DEK is never cached.** A per-organization key held in a process-wide
+  map is one bug away from the wrong tenant. Unwrapping is a single AES-GCM
+  operation — microseconds against a provider network call.
+- **A stored BYOK endpoint is re-validated at use time**, not only at write
+  time, because the SSRF ruleset can tighten after a row was written.
+- **A failed decrypt is a security event, not a routine error.** It means a row
+  does not belong where it sits. Logged as such; the credential is treated as
+  unusable and nothing about the stored bytes surfaces.
+- **Revoke and delete are separate.** Revocation keeps the record for audit;
+  deletion honours "remove my key from your systems". The audit row survives
+  either way, because it never held the secret.
+- **`credentials_revoked_consistent`** is a database CHECK: a revoked row must
+  have a revocation timestamp, so "is it revoked?" has one answer rather than
+  two fields that can disagree.
+
+### Deviations and gaps
+
+| Planned | Actual | Reason |
+|---|---|---|
+| Test connection verified against a live provider | Implemented, **never run successfully** | No API key exists here. The path is exercised: it decrypts, calls the adapter, records the result, and returns a normalised reason. What it does against a real key is unverified. |
+| Per-credential permission scopes | Not implemented | Credential management is gated on `ORG_UPDATE`/`ORG_DELETE`. Finer scoping belongs with the API-key work in Phase 9 rather than being invented now. |
+| Google adapter | Credential type accepted; **no adapter** | Consistent with Phase 3 — a key can be stored, but `describeSource` will report it unusable for chat until the adapter exists. |
 
 ---
 

@@ -83,7 +83,7 @@ export class AiController {
   @RequirePermission(Permission.PROJECT_READ)
   @Get('models')
   async models(@CurrentTenant() tenant: TenantContext) {
-    const providers = this.credentials.availableProviders(tenant);
+    const providers = await this.credentials.availableProviders(tenant);
 
     return {
       providers,

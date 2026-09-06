@@ -53,7 +53,10 @@ export class GatewayService {
     private readonly credentials: CredentialsService,
   ) {}
 
-  private adapterFor(context: TenantContext, model: ModelDescriptor): ProviderAdapter {
+  private async adapterFor(
+    context: TenantContext,
+    model: ModelDescriptor,
+  ): Promise<ProviderAdapter> {
     const factory = ADAPTERS[model.providerId];
     if (!factory) {
       throw new ProviderError({
@@ -64,7 +67,7 @@ export class GatewayService {
       });
     }
 
-    const credential = this.credentials.resolve(context, model.providerId);
+    const credential = await this.credentials.resolve(context, model.providerId);
     if (!credential) {
       throw new ProviderError({
         code: ProviderErrorCode.NO_CREDENTIAL,
@@ -90,7 +93,7 @@ export class GatewayService {
     meta: { projectId?: string | null; requestId?: string | undefined },
   ): Promise<GatewayResult> {
     const plan = planRoute(request, {
-      availableProviders: this.credentials.availableProviders(context),
+      availableProviders: await this.credentials.availableProviders(context),
     });
 
     const candidates = [plan.primary, ...plan.fallbacks];
@@ -99,7 +102,8 @@ export class GatewayService {
 
     for (const model of candidates) {
       try {
-        const response = await this.adapterFor(context, model).chat(request, model.id);
+        const adapter = await this.adapterFor(context, model);
+        const response = await adapter.chat(request, model.id);
         const cost = estimateCostByModelId(model.id, response.usage);
 
         await this.record(context, {
@@ -194,11 +198,11 @@ export class GatewayService {
        * generic 500 after the SSE headers have already been sent.
        */
       const plan = planRoute(request, {
-        availableProviders: this.credentials.availableProviders(context),
+        availableProviders: await this.credentials.availableProviders(context),
       });
       model = plan.primary;
 
-      const adapter = this.adapterFor(context, model);
+      const adapter = await this.adapterFor(context, model);
 
       for await (const event of adapter.stream(request, model.id)) {
         if (event.type === 'done') {

@@ -5,11 +5,12 @@ Multi-tenant AI workspace and AI workforce platform.
 > **Standalone product.** MOKA AI shares no code, data, users, APIs, business
 > logic, branding or configuration with any other product.
 
-**Status: Phase 3 (AI Gateway) complete.** Phases 1–3 delivered:
+**Status: Phase 4 (Moka Credentials) complete.** Phases 1–4 delivered:
 
 - **Phase 1** — authentication, organizations, multi-tenancy, RBAC, auditing
 - **Phase 2** — document ingestion, chunking, full-text retrieval with RRF fusion
 - **Phase 3** — provider-agnostic AI gateway, model router, usage ledger, SSRF-guarded egress
+- **Phase 4** — per-organization encrypted credential vault with BYOK
 
 Two things are deliberately not working, and the code says so rather than
 pretending otherwise:
@@ -146,6 +147,25 @@ free: token counts stay authoritative so cost can be backfilled.
 All outbound traffic goes through `safeFetch`, which validates the address in
 the connection path itself rather than before it — checking a hostname and then
 letting `fetch` re-resolve it is a DNS-rebinding hole.
+
+---
+
+## Moka Credentials
+
+Provider API keys are stored under envelope encryption: a root key wraps a
+per-organization data key, which encrypts each credential.
+
+`credentials.id` deliberately has **no database default**. The ciphertext's
+AES-GCM additional authenticated data binds it to
+`(organization, credential, provider)`, so the id must exist before encryption.
+The consequence is the point: an attacker with *write* access to the database
+still cannot read another tenant's key, because moving a ciphertext row
+invalidates it. That is tested by physically copying one tenant's encrypted
+bytes into another tenant's row and confirming it will not decrypt.
+
+Only a non-reversible fingerprint and the last four characters are stored for
+display. The plaintext appears in no column, no log, no audit record and no
+API response — each of which is asserted by a test.
 
 ---
 
