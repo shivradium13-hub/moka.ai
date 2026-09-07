@@ -1,10 +1,13 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 10 (Production) COMPLETE.** Phases 1–7, 9 and 10 done.
-> Phase 8 cannot be built on this machine (no Hyper-V, no gVisor — see the
-> caveat below). Standing limits unchanged: no provider API key, so no live
-> model call has been made; pgvector unavailable, so retrieval is lexical
-> (§B1); and no web search engine configured, so research runs against
+> **Status: Phases 1–7, 9 and 10 COMPLETE. Phase 8 PARTIALLY complete.**
+> Phase 8's five items split along the sandbox blocker: **MCP and
+> agent-to-agent delegation are built and tested**; the **coding agent,
+> sandbox and browser agent are not**, and cannot be on this machine (no
+> Hyper-V, no gVisor — see the caveat below). Nothing resembling a sandbox
+> ships in their place (§45). Standing limits unchanged: no provider API key,
+> so no live model call has been made; pgvector unavailable, so retrieval is
+> lexical (§B1); and no web search engine configured, so research runs against
 > supplied URLs (§B4). Verified 2026-09-07.
 
 ---
@@ -925,6 +928,164 @@ discovered.
 
 ---
 
+## Phase 8 — completion record (MCP and delegation; the sandbox half is NOT built)
+
+**Gate met for the half that could be built.** `pnpm verify` passes,
+`pnpm test:security` passes with **security suite 12 — agent composition**, and
+the drills still pass.
+
+| Check | Result |
+|---|---|
+| Typecheck | 26/26 tasks, strict mode, zero errors |
+| Lint | 14/14 packages, 0 errors, 0 warnings |
+| Unit tests | **825 passed** (52 new: delegation 20, MCP 32) |
+| Build | 14/14 packages |
+| **Security suites** | **249 passed** across 12 suites — agent composition 22 new |
+| **Operational drills** | **32 passed**, unchanged |
+
+### What was built, and what was not
+
+| Phase 8 item | Status | Why |
+|---|---|---|
+| MCP client | **Built** | JSON-RPC over HTTP through `safeFetch`. No isolation needed. |
+| Agent-to-agent | **Built** | An authorisation question. No new execution surface. |
+| Coding agent | **Not built** | Needs a sandbox. |
+| Sandbox | **Not built** | No Hyper-V, no gVisor on this host. |
+| Browser agent | **Not built** | Needs process isolation for the browser. |
+
+The roadmap's own blocker note (§B2) says WSL2 is "required for the sandbox and
+browser-agent isolation". It does not say MCP or delegation need it, and on
+inspection they do not. Building the two that are safe to build, and leaving
+the three that are not, is what §45 asks for — the alternative was deferring
+work that was never blocked.
+
+### Delegation is an authorisation problem wearing a feature's clothes
+
+"Let an agent call another agent" sounds like composition. It is a question
+about authority with exactly one safe answer: **a delegate may never do
+anything its delegator could not already do.**
+
+Get it wrong and delegation becomes the cleanest escalation path in the system.
+A viewer runs a research agent; it delegates to an admin-configured cleanup
+agent; the cleanup agent deletes projects. Every component behaved correctly,
+and the viewer just deleted projects.
+
+So one rule, applied to each dimension of authority:
+
+| Dimension | Rule |
+|---|---|
+| Allowlist | **INTERSECTION**, never the delegate's own |
+| Risk ceiling | **MINIMUM** of the two |
+| Principal | **INHERITED UNCHANGED** — never re-derived, never upgraded |
+| Budget | **SHARED** with the parent run, never reset |
+
+The principal rule is the one worth staring at. Running a delegate "as the
+agent" reads as cleaner and is how most agent frameworks do it. It is also
+precisely how an agent stops being a tool the user wields and becomes a set of
+credentials the user borrows.
+
+The budget rule closes a quieter hole: a delegate with a fresh step budget
+would make `maxSteps` bound one agent rather than one run, so N levels would
+multiply the cost of a run by N. That is not a budget, it is a suggestion.
+
+Delegation is exposed as an ordinary tool (`delegate_to_agent`) rather than as
+a special case in the runtime loop, so it passes through `authorizeToolCall`
+like everything else — three gates that already existed, reused rather than
+reimplemented. It is classified DRAFT rather than READ, because a delegated run
+can call any tool the parent could; classifying the indirection by how it looks
+rather than by what it can cause would let a READ agent reach DRAFT tools.
+
+### An MCP server is a third party, not a plugin
+
+The single most important sentence in the MCP work. An MCP server is a remote
+host, chosen by an operator who may not have read its source, that gets to put
+text in front of a model holding this organization's authority. Tool
+descriptions land in the most authoritative-seeming region of the prompt — the
+model's own tool documentation.
+
+**The rule: a server DESCRIBES, it never AUTHORISES.**
+
+It supplies a name, a description and an input schema. It may not supply
+permission, risk, approval requirement or customer-safety. Those are assigned
+locally, at the most restrictive setting, and the client's wire schema has no
+field for them — a server that sends `"risk": "read"` finds it silently
+dropped.
+
+| Defence | What it stops |
+|---|---|
+| Namespaced names (`mcp__<slug>__<tool>`) | A server registering `delete_project` and shadowing the real one |
+| Local authority | A remote host choosing what it is allowed to do |
+| Never `customerSafe` — hard-coded, not defaulted | A third party reachable by anonymous visitors through a chatbot |
+| `neutraliseUntrusted` on descriptions AND results | A tool description impersonating our own framing |
+| Approval required above READ | A third party acting for the organization unseen |
+| `safeFetch`, redirects disabled | SSRF; and re-POSTing a body with a credential to wherever a host points |
+
+`mcp:invoke` and `agent:run` were added as permissions rather than reusing an
+existing one. Neither is a viewer capability, for the reason `research:run` is
+not: they spend provider tokens and, for MCP, hand this organization's data to
+a third party. That is a write in every sense that matters — it is simply a
+write to somebody else's database.
+
+No `configuredInternalHosts` exception is passed for MCP. `SEARXNG_URL` gets
+one because it is a single value an operator set deliberately; MCP servers are
+a **list that grows**, and an escape hatch on a growing list is not an
+exception, it is a policy. A self-hosted MCP server on a private network is a
+real use case and is not supported today — refused with a reason rather than
+quietly enabled.
+
+### Two defects found while building this
+
+**`pnpm db:seed` broke, and suite 4 caught it.** Phase 10's `0014_roles_rls.sql`
+gave `roles` a WITH CHECK stricter than its USING clause, so the application
+cannot mint a system role. Correct — but `moka_migrator` is subject to FORCE
+RLS too, and the seed inserts exactly those system roles with a NULL
+organization. The rbac-sync suite failed the moment the seed could no longer
+write, which is precisely what it was written for. Fixed in
+`0016_roles_seed_policy.sql` with a policy scoped `TO moka_migrator`; the app
+role's rules are untouched.
+
+**A naive foreign key would have accepted a cross-tenant parent run**, and the
+mutation test proved it rather than asserting it. Replacing the composite
+`(organization_id, parent_run_id)` key with a single-column one made suite 12's
+cross-tenant test fail — RI checks bypass RLS, so the check finds the row the
+policy hides. The same lesson as Phase 6, demonstrated again on new columns.
+
+### Mutation records
+
+| Mutation | Caught by |
+|---|---|
+| Allowlist union instead of intersection | suite 12 (three-level chain) + unit |
+| Risk ceiling MAX instead of MIN | suite 12 + unit |
+| Delegate gets a fresh step budget | unit only |
+| Cycle detection removed | suite 12 + unit |
+| Visitor allowed to delegate | suite 12 + unit |
+| Server allowed to declare its own risk | unit only |
+| Imported tool marked `customerSafe` | suite 12 + unit |
+| Namespace prefix dropped | suite 12 + unit |
+| Composite FK replaced with a single-column FK | suite 12 |
+
+Recorded honestly: two mutations were caught **only** by the package unit
+suites and passed suite 12. Both are cases where a second control masked the
+first — a server's inflated risk is still capped by the agent's ceiling, and an
+oversized delegate budget is still bounded by the parent's own `maxSteps` on
+the next hop. Defence in depth working as intended, and a reason not to read a
+green security suite as proof that every individual control is live.
+
+### Not verified
+
+**No live model call has been made**, so no agent has ever actually decided to
+delegate, and no real model has read an MCP tool description. The authorisation
+paths are exercised against scripted input — which is what made the hostile
+cases testable at all, since a real model sometimes behaves and a test that
+passes for that reason is a test of the model.
+
+**No real MCP server has been contacted.** There is none here. The client
+follows the documented JSON-RPC shape and is tested against scripted servers,
+including deliberately hostile ones — the same approach taken for the provider
+adapters in Phase 3, and honest about the same gap.
+
+---
+
 ## 0. Blockers to clear before Phase 2
 
 Three environment gaps must be closed. **None of them block Phase 1**, so work can start immediately while these are arranged.
@@ -1033,12 +1194,18 @@ Each phase closes only when its work is implemented, typed, tested, linted, buil
 | **5 — Agent Engine** | Runtime loop, tool engine, permission levels, approval engine, budgets, audit | **Security suites 2, 5** | Phases 3, 4 |
 | **6 — Customer Chatbot** *(COMPLETE)* | Builder, widget bundle, deployments, support agent, customer boundary, handoff | **Security suite 8** ✅; widget contains no secret ✅ | Phase 5 |
 | **7 — Business Agents** *(COMPLETE)* | Templates, Path C research pipeline, website crawler, agent builder | **Security suite 6 (SSRF)** ✅; no fabricated citations ✅ | Phases 5, 6 |
-| **8 — Advanced AI** | Coding agent, sandbox, browser agent, MCP, agent-to-agent | **Security suites 7, 9** | **B2 resolved + a Linux host** |
+| **8 — Advanced AI** *(PARTIAL)* | MCP ✅ and agent-to-agent ✅; coding agent, sandbox and browser agent **blocked** | **Security suites 7, 9** ✅ **+ suite 12** ✅ | **B2 resolved + a Linux host** for the remaining three |
 | **9 — SaaS** *(COMPLETE)* | Plans, entitlements, credits, usage dashboard, enforcement, billing boundary | **Security suite 11** ✅; no hard-coded limits ✅ | Phase 5 |
 | **10 — Production** *(COMPLETE)* | Security audit, performance and load testing, backup and restore drill, failure recovery, deployment, monitoring | **Full security suite (227) + restore drill** ✅; security audit published ✅ | All |
 
 ### Phase 8 caveat
-Phase 8 cannot be completed on the current machine. Windows 11 Home has no Hyper-V and no gVisor, so genuine isolation for AI-generated code is unavailable. Per §45 we will not ship a stub that merely appears to sandbox. The coding agent and sandbox stay explicitly marked TODO and disabled until a Linux host exists.
+Phase 8 splits along the sandbox blocker, and only part of it is blocked.
+
+**Blocked — coding agent, sandbox, browser agent.** Windows 11 Home has no Hyper-V and no gVisor, so genuine isolation for AI-generated code is unavailable. Per §45 we will not ship a stub that merely appears to sandbox. These stay explicitly TODO and disabled until a Linux host exists.
+
+**Not blocked — MCP and agent-to-agent.** Neither needs process isolation. MCP is JSON-RPC over HTTP through `safeFetch`; delegation is an authorisation question with no new execution surface. Both are built, tested and gated by security suite 12. See the Phase 8 completion record above for what that took and what it deliberately refuses.
+
+The MCP **stdio transport** is the one place where the blocker reaches this half, and it is refused rather than deferred: stdio spawns the server as a child process from a configured command line, which is arbitrary command execution driven by a database row. Refused in the client, and again by a CHECK constraint on `mcp_servers.transport`.
 
 ### Honest scope note
 The full ten-phase programme is 12–18 months of work for a team, not a short project. Phases are ordered by dependency and each is independently shippable, so value lands continuously rather than only at the end.

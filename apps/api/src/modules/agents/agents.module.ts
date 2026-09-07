@@ -3,6 +3,8 @@ import { AgentsController } from './agents.controller.js';
 import { AgentsService } from './agents.service.js';
 import { AgentRunnerService } from './agent-runner.service.js';
 import { ToolBackendService } from './tool-backend.service.js';
+import { McpService } from './mcp.service.js';
+import { McpController } from './mcp.controller.js';
 import { KnowledgeModule } from '../knowledge/knowledge.module.js';
 import { AiModule } from '../ai/ai.module.js';
 import { ResearchModule } from '../research/research.module.js';
@@ -12,8 +14,8 @@ import { ResearchModule } from '../research/research.module.js';
   // AiModule supplies GatewayService (the agent's model);
   // ResearchModule supplies ResearchService (the web_research tool).
   imports: [KnowledgeModule, AiModule, ResearchModule],
-  controllers: [AgentsController],
-  providers: [AgentsService, AgentRunnerService, ToolBackendService],
-  exports: [AgentsService, AgentRunnerService],
+  controllers: [AgentsController, McpController],
+  providers: [AgentsService, AgentRunnerService, ToolBackendService, McpService],
+  exports: [AgentsService, AgentRunnerService, McpService],
 })
 export class AgentsModule {}

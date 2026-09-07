@@ -114,7 +114,8 @@ apps/
 packages/
   core/      Domain types, typed errors, RBAC, redaction.
   knowledge/ Parsers, chunking, retrieval, storage driver.
-  agents/    Tool contracts, authorization, prompt isolation, runtime.
+  agents/    Tool contracts, authorization, prompt isolation, runtime,
+             delegation, MCP client.
   chat/      Customer-chatbot logic: origins, keys, grounding, the widget.
   research/  Citation ledger, crawl policy, search providers, Path C pipeline.
   billing/   Plans, entitlements, the credit ledger, the payment boundary.
@@ -129,7 +130,7 @@ infra/
   billing/   Credit-ledger reconciliation.
   bench/     Isolation-overhead benchmark.
 tests/
-  security/  11 suites, against real PostgreSQL.
+  security/  12 suites, against real PostgreSQL.
   drills/    Backup/restore, readiness, reconciliation.
 docs/        Architecture, security, audit, operations, performance, roadmap.
 ```
@@ -452,6 +453,72 @@ Three layers, in order of how much they are relied upon — the last one least:
    silently.
 
 Full detail in [docs/security.md](docs/security.md).
+
+---
+
+## External tools and sub-agents
+
+Two ways an agent can reach beyond its own tool list, both added in Phase 8.
+
+### Agent-to-agent delegation
+
+An agent can hand a sub-task to another agent with `delegate_to_agent`. One
+rule governs it: **a delegate can never do anything its delegator could not
+already do.**
+
+| Dimension | Rule |
+|---|---|
+| Allowlist | intersection of the two, never the delegate's own |
+| Risk ceiling | the lower of the two |
+| Principal | inherited unchanged — the invoking user stays the ceiling |
+| Budget | shared with the parent run, never reset |
+
+Without the first two, a narrow agent could borrow a broad one's reach by
+calling it. Without the third, an agent stops being a tool the user wields and
+becomes a set of credentials the user borrows. Without the fourth, `maxSteps`
+would bound one agent rather than one run.
+
+Bounded at three levels, with cycle detection on the first hop rather than at
+the depth limit — relying on depth to break a loop means every loop costs the
+maximum before failing. A chatbot visitor cannot delegate at all: a stranger
+should not be able to fan one anonymous message out into a tree of model calls
+billed to the organization.
+
+A delegate's reply is treated as **untrusted content**. It feels more
+trustworthy than a web page and is not — it is model output, from a model that
+may have read a hostile page thirty seconds earlier.
+
+### MCP (Model Context Protocol)
+
+An admin can register an external MCP server, whose tools then become available
+to agents that list them.
+
+**An MCP server is a third party, not a plugin.** It is a remote host, chosen
+by an operator who may not have read its source, that gets to put text in front
+of a model holding this organization's authority — and tool descriptions land
+in the most authoritative-seeming part of the prompt.
+
+So: **a server describes, it never authorises.**
+
+| The server supplies | The server may NOT supply |
+|---|---|
+| name, description, input schema | permission, risk, approval requirement, customer-safety |
+
+Those are assigned locally at the most restrictive setting. The client's wire
+schema has no field for them, so a server that sends `"risk": "read"` has it
+silently dropped. Every imported tool is namespaced `mcp__<slug>__<tool>` so it
+cannot shadow a builtin, is never reachable by an anonymous chatbot visitor,
+requires human approval above `read`, and has its description and results
+neutralised like any crawled page.
+
+**The stdio transport is refused, not deferred.** It spawns the server as a
+child process from a configured command line — arbitrary command execution
+driven by a database row. Refused in the client and again by a CHECK constraint
+on `mcp_servers.transport`.
+
+Every request goes through `safeFetch` with redirects disabled: a JSON-RPC
+endpoint has no reason to redirect, and following one would re-POST the body —
+including any credential — to wherever the first host pointed.
 
 ---
 

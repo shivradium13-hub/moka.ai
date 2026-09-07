@@ -1,7 +1,7 @@
 # Security audit
 
-**Scope:** MOKA AI, phases 1–10, as of 2026-09-07.
-**Method:** design review against the implementation, plus 227 automated assertions in 11 security suites and 32 in 3 operational drills, all run against real PostgreSQL 16 with the production role model.
+**Scope:** MOKA AI, phases 1–10 (Phase 8 partial), as of 2026-09-07.
+**Method:** design review against the implementation, plus 249 automated assertions in 12 security suites and 32 in 3 operational drills, all run against real PostgreSQL 16 with the production role model.
 **Auditor:** the same party that wrote the code. That is a real limitation and §11 says what it means.
 
 ---
@@ -10,16 +10,20 @@
 
 The system's tenant isolation rests on PostgreSQL row-level security with `FORCE ROW LEVEL SECURITY`, a two-role model in which no role holds `BYPASSRLS`, and an application that can never name a tenant it was not authenticated as. That foundation is sound and is tested adversarially rather than descriptively.
 
-Two genuine defects were found during this audit. Both were latent — neither was exploitable in the deployed configuration on the day it was found, and neither would have produced any error when it became exploitable. That is the characteristic failure mode of this architecture and is the reason the audit focused where it did.
+Four genuine defects were found across this audit and the Phase 8 work that followed it. Every one was latent — none was exploitable in the deployed configuration on the day it was found, and none would have produced any error when it became exploitable. That is the characteristic failure mode of this architecture and is the reason the audit focused where it did.
+
+Findings 1, 2 and 7 were each found by a TOOL built during the work, not by inspection: the readiness probe, the reconciler, and the RBAC-sync suite respectively. Finding 8 was found by mutation-testing a control rather than by reading it. That pattern is the most useful single result in this document.
 
 | # | Finding | Severity | Status |
 |---|---|---|---|
 | 1 | `roles` carried `organization_id` with no RLS policy | Medium (latent) | **Fixed** — `0014_roles_rls.sql` |
 | 2 | Cached credit balance diverged from the authoritative ledger | Medium | **Detected and corrected**; cause not reproducible in current code |
-| 3 | No sandbox for AI-generated code | High, **accepted** | Phase 8 not built; capability absent rather than faked |
+| 3 | No sandbox for AI-generated code | High, **accepted** | Phase 8's sandbox half not built; capability absent rather than faked |
 | 4 | No live provider verification | Medium, **accepted** | No provider key has ever existed on this machine |
 | 5 | Rate limiting is per-process without Redis | Medium | Mitigated: production refuses to boot without `REDIS_URL` |
 | 6 | Retrieval is lexical, not vector | Low (not security) | pgvector unavailable on this host |
+| 7 | `0014` broke the seed: the migration role could not write system roles | Low (availability) | **Fixed** — `0016_roles_seed_policy.sql` |
+| 8 | A naive FK on `agent_runs.parent_run_id` would accept a cross-tenant parent | Medium (prevented) | **Prevented** — composite FK; demonstrated by mutation |
 
 ---
 
@@ -38,10 +42,13 @@ Two genuine defects were found during this audit. Both were latent — neither w
 | File access isolation | 9 | 15 |
 | Knowledge isolation | 10 | 17 |
 | Entitlement enforcement | 11 | 30 |
+| Agent composition (delegation + MCP) | 12 | 22 |
 | RBAC synchronisation | — | 8 |
 | Backup, restore, readiness, reconciliation | drills | 32 |
 
-34 tables, 27 of them organization-scoped, all 27 with RLS **enabled and forced**, and 27 policies. The 7 without RLS carry no `organization_id` and hold no tenant data (`users`, `permissions`, `role_permissions`, `plans`, the migration ledger and similar).
+35 tables, 27 of them carrying an `organization_id`, all 27 with RLS **enabled and forced** — 28 forced in total, the extra being `organizations` itself, which is scoped by its own `id`. 29 policies across those 28 tables; `roles` carries two, the second scoped `TO moka_migrator` so the seed can write system roles (finding 7).
+
+The 7 tables without RLS carry no `organization_id` and hold no tenant data (`users`, `permissions`, `role_permissions`, `plans`, the migration ledger and similar). This is not asserted by inspection: `Database.probe()` re-derives it from the catalog on every readiness poll.
 
 Every suite is **mutation-tested**: a control is removed, the suite is re-run, and it must fail. Records in `docs/roadmap.md`.
 
@@ -129,6 +136,20 @@ Both are asserted in `tests/drills/readiness.test.ts`, including that the refusa
 
 Each of these is a capability the system does **not** have. §45 forbids shipping something that appears to work, so in each case nothing ships rather than something partial.
 
+### 7.0 Phase 8 is half-built, and the built half is the half without a sandbox
+
+MCP and agent-to-agent delegation ship. The coding agent, the sandbox and the
+browser agent do not. That split is not a compromise — it follows the blocker:
+neither MCP nor delegation needs process isolation, and §B2 never claimed they
+did.
+
+The one place the blocker reaches the built half is the MCP **stdio
+transport**, which spawns the server as a child process from a configured
+command line. That is arbitrary command execution driven by a database row, and
+it is refused twice: in the client, and by a CHECK constraint on
+`mcp_servers.transport` so the refusal survives a direct write that bypasses
+the application.
+
 ### 7.1 No sandbox (High)
 
 Phase 8's coding agent requires genuine isolation for AI-generated code. The development machine is Windows 11 Home: no Hyper-V, no gVisor. Nothing resembling a sandbox ships in its place.
@@ -172,6 +193,13 @@ pgvector is unavailable on this host, so retrieval is lexical rather than semant
 | Chatbot visitor reaches staff data | customer principal holds no role; read-only, published-only | suite 8 |
 | Application raises its own limits | `SELECT`-only grant on the plan catalogue | suite 11 |
 | Application rewrites billing history | append-only by `GRANT` | suite 11, restore drill |
+| A delegate exceeds its delegator | allowlist intersection, minimum ceiling, inherited principal | suite 12 |
+| Delegation runs away or loops | shared budget, depth ceiling, cycle check, CHECK constraint backstop | suite 12 |
+| An MCP server grants itself authority | wire schema has no authority fields; risk assigned locally | suite 12 |
+| An MCP server shadows a builtin tool | namespaced tool names | suite 12 (against every builtin) |
+| An MCP server is reached by an anonymous visitor | `customerSafe: false` hard-coded | suite 12 |
+| An MCP server URL points at internal infrastructure | `safeFetch`, redirects disabled | suite 6 + service |
+| A configured command line is executed | stdio refused in client AND by a CHECK constraint | suites 7, 12 |
 | Backup silently empty under RLS | role-checked backup, TOC verified | backup drill |
 | Restore silently drops the ACLs | no `--no-acl`, no `--no-owner`; grants re-asserted | restore drill |
 | A new table ships without a policy | readiness probe queries the catalog | readiness drill |
@@ -198,6 +226,7 @@ Stated so the coverage above is not read as more than it is:
 In priority order.
 
 1. **Before any production traffic:** run `pnpm test:security` and `pnpm test:drill` against the production database, as the production roles. The readiness probe and the boot guard both catch configuration mistakes that nothing else will.
+1a. **Before registering any MCP server:** understand that this points the organization's agents at a third party that can put text in front of a model holding its authority. Start at the default `read` ceiling and raise it only for a server whose source you have read.
 2. **Before Phase 8:** obtain a host with real isolation primitives. The coding agent is not buildable safely without one, and a partial sandbox is worse than none because it invites trust.
 3. **Before charging anyone:** validate the gateway against a real provider key in staging. Token accounting and error mapping are the least-verified code in the system.
 4. **Wire `pnpm billing:reconcile` into a nightly job** and alert on exit code 2. It is the only thing that will notice a drifting balance.

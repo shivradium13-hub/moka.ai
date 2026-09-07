@@ -495,6 +495,7 @@ These live in `tests/security/` and run against real PostgreSQL and Valkey in CI
 | 9 | File access isolation | Uploaded files are reachable only within the owning organization; path traversal fails by construction, because no user-controlled string ever reaches the filesystem |
 | 11 | Entitlement enforcement | Limits resolve from data with no code fallback; the application cannot edit the catalogue it is checked against; the credit ledger is append-only, sign-checked and reconciles against the cached balance |
 | 10 | Knowledge isolation | Retrieval, citation and re-index paths never surface another organization's chunks |
+| 12 | Agent composition | A delegate can never exceed its delegator, on any dimension; an MCP server describes tools but never authorises them; the stored delegation chain cannot cross a tenant |
 
 Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6. Suite 6 gates Phase 7, alongside the citation-integrity gate in §4.6. Suite 11 gates Phase 9. Suites 4, 7 and 9 complete the set in Phase 10, alongside the operational drills.
 
@@ -510,6 +511,35 @@ The policy on `organization_members` checks the tenant and nothing else, which i
 
 The current posture is strong for a reason worth stating precisely: the safest way to survive a sandbox escape is to have nothing to escape from. There is no `exec` to reach, no `vm` to escape, no `eval` for a prompt to talk its way into. Suite 7 keeps that true as services are added, and includes a test that **fails if `packages/sandbox` ever appears** — so whoever builds it has to replace the placeholder with real escape tests rather than inheriting a green tick.
 
+### Suite 12 tests the seam, not the parts
+
+Phase 8 added two ways for an agent to reach something outside its own tool
+list: it calls another agent, or it calls a tool defined by a remote third
+party. Both are composition, and composition is where authorisation models
+break — each component can be individually correct while the combination is
+not.
+
+So suite 12 deliberately does not re-test `authorizeDelegation` or the MCP
+import in isolation; the package unit suites do that exhaustively. It tests
+them **together with `authorizeToolCall` and the real registry**, because that
+is where an escalation would actually live.
+
+The two properties it exists to hold:
+
+**A delegate can never exceed its delegator.** Allowlists intersect, ceilings
+take the minimum, and the principal is inherited unchanged. Asserted across a
+three-level chain, because one hop does not test composition. Running a
+delegate "as the agent" rather than as the person is how an agent stops being a
+tool the user wields and becomes a set of credentials the user borrows.
+
+**An MCP server describes, it never authorises.** A server supplies a name, a
+description and an input schema. Permission, risk, approval and
+customer-safety are assigned locally at the most restrictive setting — the wire
+schema has no field for them, so a server sending `"risk": "read"` has it
+silently dropped. Suite 12 asserts the composed outcome: a hostile server
+declaring itself `customerSafe` is still refused for an anonymous visitor, and
+a viewer still cannot reach an MCP tool through any agent configuration.
+
 ### Suite 9 tests construction, not filtering
 
 A storage key is built from server-generated UUIDs plus an extension allowlisted to `[a-z0-9]{1,8}`. The user's filename contributes the extension and nothing else, so traversal, absolute paths, NUL bytes, Windows device names and case-collision tricks are impossible **by construction**. Filtering is what you do when the dangerous value is still in your hand; suite 9 asserts that it never is.
@@ -519,6 +549,14 @@ Suite 11 is numbered beyond the §39 list of ten because it tests a property the
 Suite 8 was originally scoped as "API authorization" (scopes, revocation, cross-organization key rejection). Those assertions did not disappear: the public deployment key IS the externally-presented key of this phase, and revocation, cross-organization rejection and rate limiting are all asserted against it. Programmatic API keys for staff integrations arrive with Phase 9.
 
 Every suite is **mutation-tested**: a control is removed, the suite is re-run, and it must fail. A security test that cannot fail is decoration. The records are in `docs/roadmap.md`.
+
+**A green suite does not prove every control is live.** Two Phase 8 mutations
+were caught only by the package unit suites and passed suite 12, because a
+second control masked the first: an MCP server's inflated risk is still capped
+by the agent's ceiling, and an oversized delegate budget is still bounded on
+the next hop. That is defence in depth working as intended, and it is also a
+reason to mutate at the level of the individual control rather than only at the
+level of the suite.
 
 **Mutating a package requires rebuilding it.** The suites import `@moka/*` from `dist`, so editing source alone changes nothing the test can see. A mutation that appears "not caught" is almost always a stale build — this was observed during Phase 10 and is recorded because the false reassurance runs in the dangerous direction.
 

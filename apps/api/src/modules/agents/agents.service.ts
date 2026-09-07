@@ -10,7 +10,7 @@ import {
   hasPermission,
   type TenantContext,
 } from '@moka/core';
-import type { RiskLevel, ToolDefinition } from '@moka/agents';
+import type { AgentConfig, RiskLevel, ToolDefinition } from '@moka/agents';
 import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
 import { AuditService } from '../../common/audit.service.js';
@@ -72,6 +72,30 @@ export class AgentsService {
     const found = (await this.list(context)).find((agent) => agent.id === agentId);
     if (!found) throw new NotFoundError('Agent');
     return found;
+  }
+
+  /**
+   * The runnable form of an agent, or `undefined` if there is no such agent.
+   *
+   * Returns `undefined` rather than throwing, because its caller is
+   * `authorizeDelegation`, which treats "no such agent" as one denial among
+   * several and must produce the same shaped answer for all of them. A throw
+   * here would make an unknown agent id distinguishable from a disabled one by
+   * the shape of the failure.
+   */
+  async findRunnable(context: TenantContext, agentId: string): Promise<AgentConfig | undefined> {
+    const found = (await this.list(context)).find((agent) => agent.id === agentId);
+    if (!found) return undefined;
+
+    return {
+      id: found.id,
+      name: found.name,
+      instructions: found.instructions,
+      permissionLevel: found.permissionLevel as RiskLevel,
+      allowlist: found.tools,
+      enabled: found.status === 'active',
+      maxSteps: found.maxSteps,
+    };
   }
 
   /**

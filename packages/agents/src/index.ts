@@ -5,3 +5,5 @@ export * from './runtime.js';
 export * from './registry.js';
 export * from './parse.js';
 export * from './templates.js';
+export * from './delegation.js';
+export * from './mcp.js';

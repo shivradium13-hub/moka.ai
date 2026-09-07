@@ -1,4 +1,14 @@
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { organizations, users } from './identity.js';
 import { projects } from './projects.js';
@@ -73,10 +83,56 @@ export const agentRuns = pgTable(
     inputTokens: integer('input_tokens').notNull().default(0),
     outputTokens: integer('output_tokens').notNull().default(0),
     requestId: text('request_id'),
+    /**
+     * The run that delegated to this one (Phase 8).
+     *
+     * Constrained in SQL by a COMPOSITE foreign key on
+     * `(organization_id, parent_run_id)`, not by the single-column reference
+     * Drizzle would generate here. Referential-integrity checks bypass RLS, so
+     * a plain FK would let a run in one tenant name a parent in another and
+     * the check would not notice. See 0015_mcp_delegation.sql.
+     */
+    parentRunId: uuid('parent_run_id'),
+    /** 0 for a run a person started; bounded at 3 by a CHECK constraint. */
+    delegationDepth: integer('delegation_depth').notNull().default(0),
+    /** The agent that delegated, kept independently of the parent run row. */
+    delegatedBy: uuid('delegated_by'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
   },
   (t) => [index('agent_runs_org_started_idx').on(t.organizationId, t.startedAt)],
+);
+
+/**
+ * External MCP servers an operator has registered (Phase 8).
+ *
+ * Stores only what the OPERATOR decided — never what a server says about
+ * itself. Tool names, descriptions and schemas are fetched live and
+ * re-validated on every discovery, because caching a third party's
+ * self-description means trusting a snapshot of it.
+ */
+export const mcpServers = pgTable(
+  'mcp_servers',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    organizationId: uuid('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** Becomes part of every imported tool name: `mcp__<slug>__<tool>`. */
+    slug: text('slug').notNull(),
+    /** Only 'http'. A CHECK constraint refuses stdio — see the migration. */
+    transport: text('transport').notNull().default('http'),
+    url: text('url').notNull(),
+    /** Operator-accepted ceiling for this server's tools. Never server-supplied. */
+    riskCeiling: text('risk_ceiling').notNull().default('read'),
+    enabled: boolean('enabled').notNull().default(true),
+    credentialId: uuid('credential_id'),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('mcp_servers_org_idx').on(t.organizationId)],
 );
 
 export const approvals = pgTable(

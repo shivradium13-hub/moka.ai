@@ -48,6 +48,8 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   [Permission.PROJECT_DELETE]: 'Delete projects',
   [Permission.AUDIT_READ]: 'Read the audit log',
   [Permission.RESEARCH_RUN]: 'Run web research tasks',
+  [Permission.MCP_INVOKE]: 'Invoke tools on an external MCP server',
+  [Permission.AGENT_RUN]: 'Run an agent, including delegating to one',
 };
 
 interface SeededOrg {

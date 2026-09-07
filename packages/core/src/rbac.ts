@@ -52,6 +52,33 @@ export const Permission = {
    * Both of those are things a viewer should not be able to cause.
    */
   RESEARCH_RUN: 'research:run',
+
+  /**
+   * Invoke a tool provided by an external MCP server (Phase 8).
+   *
+   * Its own permission for the same reason `RESEARCH_RUN` has one, only more
+   * so. An MCP call spends provider tokens AND hands arguments to a third
+   * party the operator registered but did not write, from this organization's
+   * address, in this organization's name.
+   *
+   * Deliberately not a viewer capability. A viewer holds no permission that
+   * writes anything, and "send this organization's data to an external server"
+   * is a write in every sense that matters — it is simply a write to somebody
+   * else's database.
+   */
+  MCP_INVOKE: 'mcp:invoke',
+
+  /**
+   * Run an agent, including delegating a sub-task to one (Phase 8).
+   *
+   * Not a viewer capability, for the same reason `RESEARCH_RUN` is not: an
+   * agent run spends provider tokens and can call every tool the invoking user
+   * holds. A viewer running an agent would still be unable to reach any
+   * writing tool — `authorizeToolCall` checks the invoking user's role on
+   * every call — but they could still spend the organization's money in a
+   * loop, and that is a capability rather than a read.
+   */
+  AGENT_RUN: 'agent:run',
 } as const;
 
 export type Permission = (typeof Permission)[keyof typeof Permission];
@@ -69,6 +96,10 @@ const MEMBER_PERMISSIONS: readonly Permission[] = [
   // Deliberately not a viewer capability: research spends money and makes
   // outbound requests in the organization's name.
   Permission.RESEARCH_RUN,
+  // Same reasoning, and the destination is a third party rather than the
+  // open web.
+  Permission.MCP_INVOKE,
+  Permission.AGENT_RUN,
 ];
 
 const ADMIN_PERMISSIONS: readonly Permission[] = [

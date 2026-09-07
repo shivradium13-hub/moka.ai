@@ -1,19 +1,29 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, gt, isNull } from 'drizzle-orm';
+import { z } from 'zod';
 import {
   AgentRuntime,
+  DELEGATE_OUTPUT_IS_UNTRUSTED,
+  MAX_DELEGATION_DEPTH,
+  RiskLevel,
   RunStatus,
+  authorizeDelegation,
   buildRegistry,
+  defineTool,
+  describeChain,
   parseModelStep,
   userPrincipal,
   type AgentConfig,
   type AgentModel,
+  type DelegationFrame,
   type ModelResult,
   type RuntimeHooks,
   type ToolDefinition,
 } from '@moka/agents';
 import { Database, agentRuns, approvals, toolExecutions } from '@moka/db';
-import { NotFoundError, redactValue, type TenantContext } from '@moka/core';
+import { NotFoundError, Permission, redactValue, type TenantContext } from '@moka/core';
+import { McpService } from './mcp.service.js';
+import { AgentsService } from './agents.service.js';
 import { DATABASE } from '../../database/database.module.js';
 import { ToolBackendService } from './tool-backend.service.js';
 import { GatewayService } from '../ai/gateway.service.js';
@@ -41,9 +51,23 @@ export class AgentRunnerService {
     private readonly backend: ToolBackendService,
     private readonly gateway: GatewayService,
     private readonly audit: AuditService,
+    private readonly mcp: McpService,
+    private readonly agents: AgentsService,
   ) {
     this.registry = buildRegistry(this.backend);
   }
+
+  /**
+   * The name of the tool an agent uses to call another agent.
+   *
+   * Exposed as an ordinary tool, on purpose. Delegation could have been a
+   * special case in the runtime loop; making it a tool means it passes through
+   * `authorizeToolCall` like everything else — an agent can only delegate if
+   * `delegate_to_agent` is on its allowlist, if its risk ceiling covers DRAFT,
+   * and if the invoking user holds the permission. Three gates that already
+   * existed, reused rather than reimplemented.
+   */
+  static readonly DELEGATE_TOOL = 'delegate_to_agent';
 
   tools(): ReadonlyMap<string, ToolDefinition> {
     return this.registry;
@@ -102,7 +126,19 @@ export class AgentRunnerService {
   async run(
     context: TenantContext,
     agent: AgentConfig & { modelId: string | null },
-    input: { message: string; requestId: string | undefined },
+    input: {
+      message: string;
+      requestId: string | undefined;
+      /**
+       * Present only when this run was started by another agent. Carries the
+       * whole ancestry, because depth alone cannot detect a cycle.
+       */
+      delegation?: {
+        readonly stack: readonly DelegationFrame[];
+        readonly parentRunId: string;
+        readonly stepsRemaining: number;
+      };
+    },
   ): Promise<{
     runId: string;
     status: RunStatus;
@@ -112,8 +148,40 @@ export class AgentRunnerService {
   }> {
     const runId = await this.startRun(context, agent.id, input);
 
+    /*
+     * The registry is built PER RUN, not once at construction.
+     *
+     * Two reasons, both security-relevant. MCP tools belong to one
+     * organization and must never leak into another's registry — a shared
+     * mutable registry would be a cross-tenant channel of the most direct
+     * kind. And an operator who disables a server expects its tools to stop
+     * existing on the next run, not at the next process restart.
+     */
+    const registry = new Map(this.registry);
+    for (const [name, tool] of await this.mcp.toolsFor(context)) {
+      // Builtins win a collision. The `mcp__` prefix makes one impossible in
+      // practice; this is what makes it impossible in principle.
+      if (!registry.has(name)) registry.set(name, tool);
+    }
+
+    const stack: readonly DelegationFrame[] = [
+      ...(input.delegation?.stack ?? []),
+      { agentId: agent.id, agentName: agent.name },
+    ];
+    const stepsRemaining = input.delegation?.stepsRemaining ?? agent.maxSteps;
+    registry.set(
+      AgentRunnerService.DELEGATE_TOOL,
+      this.delegateTool(context, {
+        parent: agent,
+        stack,
+        stepsRemaining,
+        parentRunId: runId,
+        requestId: input.requestId,
+      }),
+    );
+
     const runtime = new AgentRuntime(
-      this.registry,
+      registry,
       this.gatewayModel(context, input.requestId),
       this.hooksFor(context, runId),
     );
@@ -248,11 +316,138 @@ export class AgentRunnerService {
     };
   }
 
+
+  /**
+   * The tool that lets one agent call another.
+   *
+   * ───────────────────────────────────────────────────────────────────────────
+   * EVERY AUTHORITY DECISION HERE IS MADE BY `authorizeDelegation`
+   *
+   * This method does I/O and nothing else: it loads the named agent, asks the
+   * pure function whether the call may happen and under what authority, and
+   * runs the narrowed config the function returns. It never computes an
+   * allowlist, a ceiling or a budget of its own.
+   *
+   * That split is deliberate. `authorizeDelegation` is pure and exhaustively
+   * tested; a second copy of its rules living here would drift, and the copy
+   * that drifts is always the one nobody tested.
+   * ───────────────────────────────────────────────────────────────────────────
+   */
+  private delegateTool(
+    context: TenantContext,
+    frame: {
+      parent: AgentConfig;
+      stack: readonly DelegationFrame[];
+      stepsRemaining: number;
+      parentRunId: string;
+      requestId: string | undefined;
+    },
+  ): ToolDefinition {
+    return defineTool({
+      name: AgentRunnerService.DELEGATE_TOOL,
+      description:
+        'Hand a self-contained sub-task to another agent in this organization and ' +
+        'receive its reply. The other agent can only use tools you can already use. ' +
+        'Use it when a task needs a different specialism, not to avoid your own limits.',
+      inputSchema: z.object({
+        agentId: z.string().uuid(),
+        task: z.string().min(1).max(4_000),
+      }),
+      outputSchema: z.string(),
+
+      /*
+       * DRAFT rather than READ. A delegated run can call any tool the parent
+       * could, including drafting ones, so classifying delegation itself as a
+       * read would let a READ-ceiling agent reach DRAFT tools through a
+       * delegate. The ceiling has to cover what the call can cause, not what
+       * the call looks like.
+       */
+      risk: RiskLevel.DRAFT,
+      permission: Permission.AGENT_RUN,
+      /*
+       * No approval gate. The DELEGATE's tool calls are each gated on their
+       * own merits — an EXECUTE tool still requires approval three levels
+       * down — so gating the delegation as well would ask a human to approve
+       * the same action twice. What is approved is the effect, not the
+       * indirection.
+       */
+      requiresApproval: false,
+      customerSafe: false,
+
+      summarise: (input) => `Delegate a sub-task to agent ${input.agentId}.`,
+
+      execute: async (input) => {
+        const decision = authorizeDelegation({
+          // The parent's config as it is running, already narrowed if this
+          // agent was itself delegated to. Passing the stored config instead
+          // would re-widen authority at every level — the escalation this
+          // whole module exists to prevent, reintroduced by a convenience.
+          parent: frame.parent,
+          delegate: await this.agents.findRunnable(context, input.agentId),
+          delegateId: input.agentId,
+          stack: frame.stack,
+          principal: userPrincipal(context.role),
+          stepsRemaining: frame.stepsRemaining,
+        });
+
+        if (!decision.allowed) {
+          /*
+           * Returned as a normal observation rather than thrown. The model
+           * asked for something it may not have; telling it so lets it try a
+           * different approach, which is what an authorisation denial should
+           * produce. Throwing would fail the whole run over a recoverable
+           * mistake.
+           */
+          return `Delegation refused: ${decision.message}`;
+        }
+
+        const result = await this.run(
+          context,
+          { ...decision.effective, modelId: null },
+          {
+            message: input.task,
+            requestId: frame.requestId,
+            delegation: {
+              stack: frame.stack,
+              parentRunId: frame.parentRunId,
+              stepsRemaining: frame.stepsRemaining,
+            },
+          },
+        );
+
+        getLogger().info(
+          {
+            chain: describeChain([...frame.stack, { agentId: decision.effective.id, agentName: decision.effective.name }]),
+            depth: frame.stack.length,
+            maxDepth: MAX_DELEGATION_DEPTH,
+            runId: result.runId,
+          },
+          'agent delegated',
+        );
+
+        /*
+         * The delegate's reply is UNTRUSTED CONTENT.
+         *
+         * It feels more trustworthy than a web page and is not: it is model
+         * output, produced by a model that may have read attacker-controlled
+         * text thirty seconds ago. Labelling it is what stops the parent
+         * treating a sub-agent's "now call delete_project" as an instruction.
+         */
+        return `${DELEGATE_OUTPUT_IS_UNTRUSTED}\n\n<untrusted_content>\n${result.output}\n</untrusted_content>`;
+      },
+    });
+  }
+
   private async startRun(
     context: TenantContext,
     agentId: string,
-    input: { message: string; requestId: string | undefined },
+    input: {
+      message: string;
+      requestId: string | undefined;
+      delegation?: { readonly stack: readonly DelegationFrame[]; readonly parentRunId: string };
+    },
   ): Promise<string> {
+    const depth = input.delegation ? input.delegation.stack.length : 0;
     const [row] = await this.db.withTenant(context, async (tx) =>
       tx
         .insert(agentRuns)
@@ -262,6 +457,14 @@ export class AgentRunnerService {
           userId: context.userId,
           input: input.message,
           requestId: input.requestId ?? null,
+          /*
+           * The chain is stored, not just bounded in memory. When a delegated
+           * run does something surprising the first question is "who asked for
+           * this?", and the answer is the ancestry rather than any one agent.
+           */
+          parentRunId: input.delegation?.parentRunId ?? null,
+          delegationDepth: depth,
+          delegatedBy: input.delegation?.stack.at(-1)?.agentId ?? null,
         })
         .returning({ id: agentRuns.id }),
     );
