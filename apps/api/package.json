@@ -16,6 +16,7 @@
     "@fastify/helmet": "^13.0.0",
     "@moka/agents": "workspace:*",
     "@moka/ai": "workspace:*",
+    "@moka/chat": "workspace:*",
     "@moka/config": "workspace:*",
     "@moka/core": "workspace:*",
     "@moka/crypto": "workspace:*",

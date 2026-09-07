@@ -115,6 +115,13 @@ export const toolExecutions = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: 'restrict' }),
     runId: uuid('run_id').references(() => agentRuns.id, { onDelete: 'set null' }),
+    /**
+     * Set instead of `runId` when the caller was a chatbot visitor: a chatbot
+     * turn is not an agent run. Deliberately NOT a foreign key — see
+     * 0009_chat_tool_executions.sql. The record that a public bot was refused
+     * a tool should survive the retention deletion of the transcript.
+     */
+    conversationId: uuid('conversation_id'),
     approvalId: uuid('approval_id').references(() => approvals.id, { onDelete: 'set null' }),
     toolName: text('tool_name').notNull(),
     outcome: text('outcome').notNull(),
@@ -127,5 +134,6 @@ export const toolExecutions = pgTable(
   (t) => [
     index('tool_executions_org_created_idx').on(t.organizationId, t.createdAt),
     index('tool_executions_run_idx').on(t.organizationId, t.runId),
+    index('tool_executions_conversation_idx').on(t.organizationId, t.conversationId, t.createdAt),
   ],
 );

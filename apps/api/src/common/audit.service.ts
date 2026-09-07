@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Database, auditLogs } from '@moka/db';
-import { redactValue, type TenantContext } from '@moka/core';
+import { ActorType, redactValue, type OrganizationScoped } from '@moka/core';
 import { DATABASE } from '../database/database.module.js';
 import { getLogger } from './logger.js';
 
@@ -31,13 +31,19 @@ export interface AuditEntry {
 export class AuditService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
-  async record(context: TenantContext, entry: AuditEntry): Promise<void> {
+  /**
+   * `OrganizationScoped` rather than `TenantContext` so the PUBLIC chat path is
+   * audited too. An anonymous visitor has no user id, so `actorId` is null and
+   * the actor type is 'customer' — but the row is written, because the surface
+   * reachable by strangers is the last one that should be missing a trail.
+   */
+  async record(context: OrganizationScoped, entry: AuditEntry): Promise<void> {
     try {
-      await this.db.withTenant(context, async (tx) => {
+      await this.db.withScope(context, async (tx) => {
         await tx.insert(auditLogs).values({
           organizationId: context.organizationId,
           actorType: context.actorType,
-          actorId: context.userId,
+          actorId: context.actorType === ActorType.CUSTOMER ? null : context.userId,
           action: entry.action,
           resourceType: entry.resourceType,
           resourceId: entry.resourceId ?? null,

@@ -180,13 +180,58 @@ Kept deliberately separate from knowledge: different lifecycle, different retent
 
 ---
 
-## 9. Chatbots (§22)
+## 9. Chatbots (§22) — IMPLEMENTED (0007–0010)
 
-**`chatbots`** — `id`, `organization_id`, `project_id NULL`, `agent_id`, `name`, `avatar_url`, `welcome_message`, `language`, `tone`, `appearance jsonb`, `handoff_config jsonb`, `status`.
+Five tables, all RLS-protected. They are the first tables in the schema reachable by someone who is not a user of the platform at all, and three properties follow from that.
 
-**`chatbot_deployments`** — `id`, `organization_id`, `chatbot_id`, `public_key text UNIQUE` (**non-secret**, domain-restricted), `allowed_domains text[] NOT NULL`, `channel` (`widget`|`api`|`react`|`html`|`wordpress`), `rate_limit_config jsonb`, `status`, timestamps.
+**`chatbots`** — `id`, `organization_id`, `project_id NULL`, `name`, `description`, `instructions`, `greeting`, `model_id`, `require_grounding bool DEFAULT true`, `min_passages`, `max_passages`, `handoff_enabled`, `retention_days`, `status` (`draft`|`active`|`disabled`), timestamps, `deleted_at`.
 
-`public_key` is a public identifier, not a credential. It is domain-bound and grants only chatbot conversation. No API key ever reaches browser-delivered code.
+Defaults to `draft`: a chatbot is not live until someone publishes it. `instructions` is operator-authored and trusted like an agent's — but it is effectively **published**, since a determined visitor can persuade a model to recite its own system prompt and no instruction reliably prevents that. The builder UI says so in those words.
+
+**`chatbot_sources`** — `chatbot_id`, `source_id`, `attached_by`.
+
+The **publication boundary**, not a filter. Anything in an attached source can be quoted verbatim to any visitor; anything not attached is unreachable however the conversation goes. Empty means the bot retrieves nothing, which with grounding on means it answers nothing — the correct default for a surface whose failure mode is publishing internal documents to the internet.
+
+**`chatbot_deployments`** — `id`, `organization_id`, `chatbot_id`, `name`, `public_key text UNIQUE`, `allowed_origins text[] NOT NULL DEFAULT '{}'`, `messages_per_minute`, `conversations_per_hour`, `status` (`active`|`revoked`), `revoked_at`.
+
+`public_key` is a public identifier, not a credential. It is pasted into the customer's HTML and readable by every visitor, so it is stored in plaintext and returned in full by the API — treating it as a secret would be theatre. It grants exactly what any visitor already has: a fresh, empty conversation with a bot that was published on purpose.
+
+`allowed_origins` empty means embeddable **nowhere**, which is the correct failure direction for a list that controls publication.
+
+This is the **one table with a narrow public read path**. A visitor arrives holding only a key, so the organization cannot be bound until it is looked up — the same shape as `0002_user_scope.sql`, and answered the same way:
+
+```sql
+CREATE POLICY tenant_isolation ON chatbot_deployments
+  USING (
+    organization_id = current_org_id()
+    OR (current_org_id() IS NULL
+        AND public_key = current_deployment_key()
+        AND status = 'active' AND revoked_at IS NULL)
+  )
+  WITH CHECK (organization_id = current_org_id());
+```
+
+`current_org_id() IS NULL` is what stops it widening tenant queries; `WITH CHECK` is untouched, so the public path reads one row and writes nothing; and `status = 'active'` inside the policy makes revocation effective immediately rather than eventually.
+
+**`chat_conversations`** — `id`, `organization_id`, `chatbot_id`, `deployment_id`, `visitor_token_hash UNIQUE`, `origin`, `status` (`open`|`awaiting_human`|`with_human`|`closed`), `message_count`, handoff fields, `expires_at`, `closed_at`.
+
+`visitor_token_hash` **is** a secret, unlike the public key, and is hashed like a session token. `origin` is the only provenance kept: no IP, no fingerprint, nothing that follows a person between visits. Staff need to tell two live conversations apart, not identify people, so the inbox shows a per-conversation pseudonym derived from the conversation id alone.
+
+**`chat_messages`** — `conversation_id`, `role` (`visitor`|`assistant`|`human`|`notice`), `content`, `citations jsonb`, `error_code`, token counts, `author_user_id` (staff replies only).
+
+`citations` records what the assistant was **shown**, derived from retrieval — not the model's account of its own sources, which is plausible rather than true.
+
+Grants are `SELECT, INSERT, DELETE` — **no `UPDATE`**. The two are different properties: what was said to a member of the public in the organization's name cannot be rewritten, but a stranger's transcript can be erased, because retention has to be able to destroy it.
+
+### Composite foreign keys (0010)
+
+Every parent reference in these tables carries `organization_id`:
+
+```sql
+FOREIGN KEY (organization_id, source_id) REFERENCES knowledge_sources (organization_id, id)
+```
+
+PostgreSQL performs referential integrity checks **with row security disabled**, so a single-column `REFERENCES parent(id)` is satisfied by any row in the installation — visible or not — and an RLS policy that only checks the child row's `organization_id` will store a cross-tenant pointer without complaint. Security suite 8 found exactly that. Carrying the tenant into the key makes same-tenancy a referential constraint rather than a policy, which holds in the one place policies do not apply. See `docs/security.md` §4.5.
 
 ---
 
@@ -254,13 +299,15 @@ Append-only: the `moka_app` role holds `INSERT` and `SELECT` grants but **no `UP
 
 Against the §36 list, with deviations noted:
 
-`users`, `organizations`, `organization_members`, `roles`, `permissions`, `role_permissions`*, `sessions`*, `projects`, `conversations`, `messages`, `providers`, `models`, `credentials`, `agents`, `agent_tools`, `agent_permissions`, `agent_knowledge`*, `agent_executions`*, `tools`, `tool_executions`, `knowledge_sources`, `knowledge_documents`, `knowledge_chunks`, `knowledge_embeddings`*, `embedding_models`*, `memories`, `chatbots`, `chatbot_deployments`, `subscriptions`, `plans`, `plan_entitlements`*, `entitlement_overrides`*, `usage_records`, `credits`, `credit_transactions`*, `api_keys`, `mcp_servers`, `mcp_tools`, `automations`, `automation_runs`, `approvals`, `audit_logs`
+`users`, `organizations`, `organization_members`, `roles`, `permissions`, `role_permissions`*, `sessions`*, `projects`, `conversations`, `messages`, `providers`, `models`, `credentials`, `agents`, `agent_tools`, `agent_permissions`, `agent_knowledge`*, `agent_executions`*, `tools`, `tool_executions`, `knowledge_sources`, `knowledge_documents`, `knowledge_chunks`, `knowledge_embeddings`*, `embedding_models`*, `memories`, `chatbots`, `chatbot_deployments`, `subscriptions`, `plans`, `plan_entitlements`*, `entitlement_overrides`*, `usage_records`, `credits`, `credit_transactions`*, `chatbot_sources`*, `chat_conversations`*, `chat_messages`*, `api_keys`, `mcp_servers`, `mcp_tools`, `automations`, `automation_runs`, `approvals`, `audit_logs`
 
 `*` = added beyond the §36 list, each for a stated reason:
 
 - **`knowledge_embeddings` + `embedding_models`** — avoids hard-coding one embedding model into the schema (§6).
 - **`agent_executions`** — `tool_executions` needs a parent run to attach to; without it there is nowhere to record budgets, step counts or run status.
 - **`plan_entitlements` / `entitlement_overrides`** — §34 explicitly requires `Plan → Entitlement → Usage → Enforcement` and forbids hard-coded limits. A flat `entitlements` table cannot express both plan defaults and per-organization exceptions.
+- **`chatbot_sources`** — the publication boundary between a chatbot and the knowledge it may quote. §36 assumed one implicit scope; making it an explicit join is what lets an organization decide, per chatbot, which internal documents become readable by the public.
+- **`chat_conversations` / `chat_messages`** — the §36 list has `conversations` and `messages` for STAFF chat. A visitor conversation is a different thing with a different principal, a different retention policy and a different token, and merging them would put an anonymous stranger's transcript in the same table as a member's.
 - **`role_permissions`, `sessions`, `agent_knowledge`, `credit_transactions`** — required join tables and ledgers, not redundant entities.
 
 No table in the §36 list has been dropped.

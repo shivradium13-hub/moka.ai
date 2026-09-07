@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { TenantContext } from '@moka/core';
-import { Permission } from '@moka/core';
-import { RiskLevel, defineTool, type ToolDefinition } from './tool.js';
+import { ActorType, InternalError, Permission } from '@moka/core';
+import { RiskLevel, defineTool, type ToolContext, type ToolDefinition } from './tool.js';
 
 /**
  * Tool registry (master prompt §19).
@@ -46,10 +46,37 @@ export interface ToolBackend {
   ): Promise<Array<{ id: string; name: string; type: string; documentCount: number }>>;
 }
 
+/**
+ * What a STAFF tool implementation receives. Narrower than `ToolContext`: it
+ * carries a full TenantContext, because these operations act as a member of
+ * the organization and need the acting user for attribution.
+ */
 export interface ToolCallContext {
   readonly tenant: TenantContext;
   readonly runId: string | null;
   readonly requestId: string | undefined;
+}
+
+/**
+ * Narrow a runtime ToolContext to a staff one.
+ *
+ * None of the tools in this registry is `customerSafe`, so the customer branch
+ * of `authorizeToolCall` refuses all of them before `execute` is ever reached
+ * — this throw should be unreachable. It exists anyway because the alternative
+ * is a cast, and a cast would turn a future registry mistake (someone marking
+ * one of these `customerSafe: true`) into a silent execution of a staff
+ * operation on behalf of an anonymous visitor. Failing loudly is the cheaper
+ * outcome by a wide margin.
+ */
+function staffContext(context: ToolContext): ToolCallContext {
+  if (context.scope.actorType === ActorType.CUSTOMER) {
+    throw new InternalError('A staff tool was invoked with a customer scope.');
+  }
+  return {
+    tenant: context.scope,
+    runId: context.runId,
+    requestId: context.requestId,
+  };
 }
 
 const projectSummary = z.object({
@@ -82,7 +109,7 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       outputSchema: z.object({ projects: z.array(projectSummary) }),
       permission: Permission.PROJECT_READ,
       risk: RiskLevel.READ,
-      execute: async (_input, context) => ({ projects: await backend.listProjects(context) }),
+      execute: async (_input, context) => ({ projects: await backend.listProjects(staffContext(context)) }),
     }),
 
     defineTool({
@@ -93,7 +120,7 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       permission: Permission.PROJECT_READ,
       risk: RiskLevel.READ,
       execute: async (input, context) => ({
-        project: await backend.getProject(context, input.projectId),
+        project: await backend.getProject(staffContext(context), input.projectId),
       }),
     }),
 
@@ -110,7 +137,7 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       permission: Permission.PROJECT_READ,
       risk: RiskLevel.READ,
       execute: async (input, context) => ({
-        results: await backend.searchKnowledge(context, {
+        results: await backend.searchKnowledge(staffContext(context), {
           query: input.query,
           limit: input.limit,
         }),
@@ -134,7 +161,7 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       permission: Permission.PROJECT_READ,
       risk: RiskLevel.READ,
       execute: async (_input, context) => ({
-        sources: await backend.listKnowledgeSources(context),
+        sources: await backend.listKnowledgeSources(staffContext(context)),
       }),
     }),
 
@@ -162,7 +189,7 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       risk: RiskLevel.DRAFT,
       summarise: (input) => `Create a project named "${input.name}" (${input.slug})`,
       execute: async (input, context) => ({
-        project: await backend.createProject(context, {
+        project: await backend.createProject(staffContext(context), {
           name: input.name,
           slug: input.slug,
           description: input.description ?? null,
@@ -183,7 +210,7 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       permission: Permission.PROJECT_DELETE,
       risk: RiskLevel.EXECUTE,
       summarise: (input) => `Permanently delete project ${input.projectId}`,
-      execute: async (input, context) => backend.deleteProject(context, input.projectId),
+      execute: async (input, context) => backend.deleteProject(staffContext(context), input.projectId),
     }),
   ];
 
@@ -197,6 +224,7 @@ export function toolCatalogue(registry: ReadonlyMap<string, ToolDefinition>): Ar
   risk: string;
   permission: string;
   requiresApproval: boolean;
+  customerSafe: boolean;
 }> {
   return [...registry.values()].map((tool) => ({
     name: tool.name,
@@ -204,5 +232,8 @@ export function toolCatalogue(registry: ReadonlyMap<string, ToolDefinition>): Ar
     risk: tool.risk,
     permission: tool.permission,
     requiresApproval: tool.requiresApproval ?? tool.risk === RiskLevel.EXECUTE,
+    // Surfaced so a human configuring an agent can see which tools are also
+    // reachable by the public. Never advertised to a model.
+    customerSafe: tool.customerSafe === true,
   }));
 }

@@ -1,9 +1,9 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 5 (Agent Engine) COMPLETE.** Phases 1–5 done, with two
-> standing limits: no provider API key exists here, so no live model call has
-> been made; and pgvector is unavailable, so retrieval is lexical (§B1).
-> Verified 2026-09-06.
+> **Status: Phase 6 (Customer Chatbot) COMPLETE.** Phases 1–6 done, with two
+> standing limits unchanged: no provider API key exists here, so no live model
+> call has been made; and pgvector is unavailable, so retrieval is lexical
+> (§B1). Verified 2026-09-07.
 
 ---
 
@@ -430,6 +430,99 @@ The gate is load-bearing, not decorative.
 
 ---
 
+## Phase 6 — completion record
+
+**Gate met.** `pnpm verify` passes, and `pnpm test:security` passes against a real PostgreSQL 17 database including the new **security suite 8 — customer boundary**.
+
+| Check | Result |
+|---|---|
+| Typecheck | 22/22 tasks, strict mode, zero errors |
+| Lint | 12/12 packages, 0 errors, 0 warnings |
+| Unit tests | **506 passed** (`@moka/chat` 78 new, `@moka/agents` +10, `@moka/api` +11) |
+| Build | 12/12 packages |
+| **Security suites** | **113 passed** — customer boundary 25 new |
+
+### What this phase actually is
+
+Phases 1–5 had exactly one kind of principal: an authenticated member of an organization. Phase 6 adds a second one that is structurally different — an anonymous member of the public, standing on somebody else's website — and almost every decision below follows from that.
+
+**A visitor is not a user with a low role. They hold no role at all.**
+
+The tempting shortcut is `role: 'viewer'`. It is wrong in a way that is easy to miss: `viewer` carries `project:read`, `organization:read` and `member:read`, so a stranger on a customer's marketing page would inherit the ability to list the organization's projects and members, and the four-gate authoriser would permit every one of those calls — correctly, having been told the caller was a viewer.
+
+So `CustomerContext` has no role field. `hasPermission` is not merely uncalled on the customer path; it does not typecheck. `authorizeToolCall` branches on a `Principal` union, and the customer branch asks three questions that all default to no: is the tool `customerSafe`, is it read-only, and is it free of an approval gate.
+
+### The five structural controls
+
+| Control | Why it is structural rather than advisory |
+|---|---|
+| **Role-less principal** | Nothing reachable from a visitor's context can produce a permission. |
+| **`customerSafe` opt-in** | A tool added to the platform is unreachable by the public until someone writes the flag and a reviewer sees it. The risk check re-derives publishability from what the tool *does*, catching a mis-declared entry at call time. |
+| **Retrieval scope as a closure** | The public `search_knowledge` captures its source allowlist. The model cannot widen it because there is no argument naming it. |
+| **Grounding checked afterwards** | The answer is discarded if retrieval returned nothing, however confident the model was. The prompt asking it not to invent is the nudge; this is the control. |
+| **Rendering behind an origin boundary** | Model output never renders in the customer's own origin, so an escaping bug in our renderer cannot become XSS on their site. |
+
+### The one narrow public read path
+
+A visitor arrives holding only a public key, so the organization cannot be bound until that key is looked up — the same chicken-and-egg as "which organizations do I belong to?" in Phase 1. It gets the same answer: a **narrow RLS policy**, not `BYPASSRLS`, not a `SECURITY DEFINER` function.
+
+    USING (organization_id = current_org_id()
+           OR (current_org_id() IS NULL
+               AND public_key = current_deployment_key()
+               AND status = 'active' AND revoked_at IS NULL))
+    WITH CHECK (organization_id = current_org_id())
+
+The `current_org_id() IS NULL` guard is what stops it widening tenant queries, and a test pins that: tenant B binds its own organization *and* presents tenant A's key, and sees only its own rows. `WITH CHECK` is untouched, so the public path reads one row and writes nothing. Revocation is effective immediately rather than eventually, because `status = 'active'` is part of the policy.
+
+### A real bug the suite found
+
+The test "a chatbot cannot be attached to another tenant's knowledge source" **failed**: the insert succeeded.
+
+PostgreSQL performs referential integrity checks with row security disabled — documented and deliberate, since otherwise a foreign key would leak the existence of invisible rows through constraint violations. So `REFERENCES knowledge_sources(id)` was satisfied by any source in the installation, and the RLS policy on the join row only checked *its own* `organization_id`, which tenant A's row satisfied.
+
+Nothing leaked today: `knowledge_chunks` is itself RLS-protected and the service checks ownership before writing. But "two independent controls happen to save us" is not "this cannot happen".
+
+`0010_chat_tenant_integrity.sql` carries `organization_id` into the key itself. A composite `FOREIGN KEY (organization_id, source_id)` makes same-tenancy a *referential* constraint rather than a policy — which holds in the one place policies do not apply. The same shape exists on some Phase 1–5 joins; that is recorded in `docs/security.md` as a known item rather than folded into this phase.
+
+### Mutation testing
+
+| Mutation | Result |
+|---|---|
+| Removed `current_org_id() IS NULL` from the deployment policy | **1 test failed** — the guard test, exactly as intended |
+| Replaced the customer branch with `hasPermission('viewer', …)` | **7 unit + 2 security tests failed**, including "a viewer outranks a visitor" and "refuses every shipped staff tool" |
+
+### Verified end to end against the running stack
+
+- Widget loader served with `cross-origin-resource-policy: cross-origin` — required, and easy to miss, because helmet's `same-origin` default would otherwise make every customer's browser refuse it with nothing but a console warning
+- Chat frame CSP carries a **per-response** style nonce and a **per-deployment** `frame-ancestors`; an unknown key still renders, framed by nobody, so a 404-vs-200 difference cannot be used to sort real keys from invented ones
+- Session from a non-allowlisted origin → `403`, with a `chat.origin_not_allowed` security event naming the presented origin
+- Session from `https://shop.example.com.evil.net` → `403` (the suffix trap)
+- Session with **no** `Origin` header → `403`
+- Session from the allowed origin → visitor token issued
+- Forged visitor token → `403`; valid token with an unknown public key → `404`, before the token is considered
+- Handoff button → conversation moves to `awaiting_human` and appears in the staff inbox
+- Staff reply stored as role `human` with the author's user id, so a transcript never blurs which sentences a person wrote
+- A second organization: conversation list empty, transcript by id `404`, chatbot list empty
+
+### Deliberately not built
+
+| Not built | Why |
+|---|---|
+| **Authenticated end-customer identity** (order lookup, "where is my parcel") | Needs a customer-authentication mechanism that does not exist yet, and authorization checked against that authenticated identity rather than an identifier typed into the chat. Building the lookup first would be building the vulnerability. Phase 7. |
+| **Scheduled retention purge** | The job queue needs Valkey, which needs Docker (§B2). Shipping a timer that dies with the process, while an operator believes their retention policy is running, would be worse than an honest button (§45). The endpoint exists and works; the schedule does not. |
+| **Streaming replies** | The gateway's streaming path exists but has never been driven by a live provider. Wiring a token stream to a public surface without once seeing it work is how you ship a widget that hangs. |
+| **A chatbot preview inside the app** | Would need a live model to be anything but theatre. |
+
+### Not verified
+
+**No live model call has been made.** There is still no provider API key here, so the public chat path has been exercised against a scripted model and against the real gateway with no credential — which produces the honest failure: the visitor gets *"I'm having trouble answering right now. If you'd like, I can pass this to a person"*, the error code is recorded, and no answer is fabricated. What a real model does with the public system prompt is unknown.
+
+The widget's browser behaviour — shadow DOM, iframe, `postMessage`, `sessionStorage` — has **not been exercised in a browser**. The assets are served with the right headers and their source is asserted on (no `innerHTML`, no `eval`, no secrets, no wildcard `postMessage` target), but nobody has clicked the launcher.
+
+`infra/docker/compose.yml` remains untested for the same reason as every prior phase.
+
+---
+
 ## 0. Blockers to clear before Phase 2
 
 Three environment gaps must be closed. **None of them block Phase 1**, so work can start immediately while these are arranged.
@@ -529,7 +622,7 @@ Each phase closes only when its work is implemented, typed, tested, linted, buil
 | **3 — AI Gateway** | Provider abstraction, OpenAI/Anthropic/Gemini adapters, model registry, normalized streaming, capability router, fallbacks, usage tracking | Adapter conformance suite; provider-failure normalization | Phase 1 |
 | **4 — Moka Credentials** | Vault UI, encryption, BYOK, test/rotate/revoke, audit | **Security suite 3** in full | Phase 3 |
 | **5 — Agent Engine** | Runtime loop, tool engine, permission levels, approval engine, budgets, audit | **Security suites 2, 5** | Phases 3, 4 |
-| **6 — Customer Chatbot** | Builder, widget bundle, deployments, support agent, customer authorization, handoff | **Security suite 8**; widget contains no secret | Phase 5 |
+| **6 — Customer Chatbot** *(COMPLETE)* | Builder, widget bundle, deployments, support agent, customer boundary, handoff | **Security suite 8** ✅; widget contains no secret ✅ | Phase 5 |
 | **7 — Business Agents** | Sales, analytics, website, marketing, social, research templates; Path C research pipeline | **Security suite 6 (SSRF)**; no fabricated citations | Phases 5, 6 |
 | **8 — Advanced AI** | Coding agent, sandbox, browser agent, MCP, agent-to-agent | **Security suites 7, 9** | **B2 resolved + a Linux host** |
 | **9 — SaaS** | Plans, entitlements, credits, usage dashboard, enforcement, billing adapter | Entitlement enforcement tests; no hard-coded limits | Phase 5 |

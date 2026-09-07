@@ -9,7 +9,7 @@ import {
   assemblePrompt,
   neutraliseUntrusted,
 } from './prompt.js';
-import { DenialReason } from './authorize.js';
+import { DenialReason, userPrincipal } from './authorize.js';
 
 /**
  * SECURITY SUITE 5 — PROMPT INJECTION.
@@ -162,8 +162,8 @@ function agent(overrides: Partial<Parameters<AgentRuntime['run']>[0]> = {}) {
 
 function request(role: SystemRole = SystemRole.ADMIN) {
   return {
-    tenant: createUserTenantContext({ organizationId: ORG, userId: USER, role }),
-    userRole: role,
+    scope: createUserTenantContext({ organizationId: ORG, userId: USER, role }),
+    principal: userPrincipal(role),
     message: 'What is the refund policy?',
     context: [],
     runId: 'run-1',

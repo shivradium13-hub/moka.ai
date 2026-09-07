@@ -4,6 +4,8 @@ import {
   AgentRuntime,
   RunStatus,
   buildRegistry,
+  parseModelStep,
+  userPrincipal,
   type AgentConfig,
   type AgentModel,
   type ModelResult,
@@ -118,9 +120,9 @@ export class AgentRunnerService {
 
     try {
       const result = await runtime.run(agent, {
-        tenant: context,
+        scope: context,
         // The INVOKING USER's role, not the agent's. This is the ceiling.
-        userRole: context.role,
+        principal: userPrincipal(context.role),
         message: input.message,
         // Knowledge retrieval is a TOOL rather than pre-loaded context, so
         // retrieved text enters as an explicitly untrusted observation.
@@ -304,42 +306,4 @@ export class AgentRunnerService {
       })
       .catch(() => undefined);
   }
-}
-
-/**
- * Interpret a model reply as either a tool call or a final message.
- *
- * Conservative by design: anything that is not unambiguously a well-formed
- * tool-call object is treated as TEXT. Guessing at a malformed call would mean
- * inventing arguments for a privileged operation, which is precisely the thing
- * that must never be improvised.
- */
-export function parseModelStep(text: string): import('@moka/agents').ModelStep {
-  const trimmed = text.trim();
-  const candidate = trimmed.startsWith('```')
-    ? trimmed.replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim()
-    : trimmed;
-
-  if (!candidate.startsWith('{')) return { type: 'message', text };
-
-  try {
-    const parsed: unknown = JSON.parse(candidate);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      typeof (parsed as { tool?: unknown }).tool === 'string'
-    ) {
-      const call = parsed as { tool: string; input?: unknown; rationale?: unknown };
-      return {
-        type: 'tool_call',
-        toolName: call.tool,
-        input: call.input ?? {},
-        ...(typeof call.rationale === 'string' ? { rationale: call.rationale } : {}),
-      };
-    }
-  } catch {
-    // Not JSON. Fall through and treat it as prose.
-  }
-
-  return { type: 'message', text };
 }

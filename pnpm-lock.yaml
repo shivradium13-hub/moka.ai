@@ -112,6 +112,12 @@ importers:
       '@eslint/js':
         specifier: ^9.17.0
         version: 9.39.5
+      '@moka/agents':
+        specifier: workspace:*
+        version: link:packages/agents
+      '@moka/chat':
+        specifier: workspace:*
+        version: link:packages/chat
       '@moka/core':
         specifier: workspace:*
         version: link:packages/core
@@ -172,6 +178,9 @@ importers:
       '@moka/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@moka/chat':
+        specifier: workspace:*
+        version: link:../../packages/chat
       '@moka/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -310,6 +319,22 @@ importers:
       openai:
         specifier: ^7.10.0
         version: 7.10.0(undici@7.29.1)(zod@3.25.76)
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.28)(supports-color@7.2.0)(tsx@4.23.13)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)(supports-color@7.2.0)
+
+  packages/chat:
+    dependencies:
+      '@moka/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       tsup:
         specifier: ^8.3.5

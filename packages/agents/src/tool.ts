@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Permission, TenantContext } from '@moka/core';
+import type { OrganizationScoped, Permission } from '@moka/core';
 
 /**
  * Tool contract (master prompt §19, §20).
@@ -45,7 +45,13 @@ export function riskWithin(agentLevel: RiskLevel, toolRisk: RiskLevel): boolean 
 }
 
 export interface ToolContext {
-  readonly tenant: TenantContext;
+  /**
+   * The organization this call is bound to, and which KIND of principal it is
+   * running for. A union rather than a TenantContext because the same runtime
+   * serves both staff agents and public chatbots — and because a type that
+   * cannot answer "what role is the caller?" cannot be used to authorise.
+   */
+  readonly scope: OrganizationScoped;
   /** Correlates every side effect of one agent run. */
   readonly runId: string | null;
   readonly requestId: string | undefined;
@@ -74,6 +80,19 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
    */
   readonly requiresApproval?: boolean;
   /**
+   * Whether this tool may be reached by an ANONYMOUS VISITOR through a
+   * customer-facing chatbot (master prompt §23).
+   *
+   * Optional, and its absence means NO. A tool added to the platform is
+   * unreachable by the public until someone writes `customerSafe: true` here
+   * and a reviewer sees that line in a diff. Publication to the internet
+   * should require a sentence, not an omission.
+   *
+   * `permission` still describes what a STAFF caller needs. It has no bearing
+   * on the customer path, because a visitor holds no role to check it against.
+   */
+  readonly customerSafe?: boolean;
+  /**
    * Human-readable summary of a proposed call, shown on the approval card.
    * Must describe the effect in the user's terms, not the tool's.
    */
@@ -99,6 +118,7 @@ export function defineTool<S extends z.ZodTypeAny, O extends z.ZodTypeAny>(defin
   permission: Permission;
   risk: RiskLevel;
   requiresApproval?: boolean;
+  customerSafe?: boolean;
   summarise?: (input: z.output<S>) => string;
   execute: (input: z.output<S>, context: ToolContext) => Promise<z.output<O>>;
 }): ToolDefinition {

@@ -1,8 +1,8 @@
 import type { z } from 'zod';
-import type { SystemRole, TenantContext } from '@moka/core';
-import { authorizeToolCall, callableTools, DenialReason } from './authorize.js';
+import type { OrganizationScoped } from '@moka/core';
+import { authorizeToolCall, callableTools, DenialReason, type Principal } from './authorize.js';
 import { advertise, type RiskLevel, type ToolDefinition } from './tool.js';
-import { assemblePrompt, type ContextBlock } from './prompt.js';
+import { assemblePrompt, neutraliseUntrusted, type ContextBlock } from './prompt.js';
 
 /**
  * Agent runtime (master prompt §18).
@@ -69,8 +69,14 @@ export interface AgentConfig {
 }
 
 export interface RunRequest {
-  readonly tenant: TenantContext;
-  readonly userRole: SystemRole;
+  /** The organization this run is bound to. Never from client input. */
+  readonly scope: OrganizationScoped;
+  /**
+   * WHO the run acts as. For a staff run this carries the invoking user's
+   * role, which is the ceiling on the run's authority. For a chatbot visitor
+   * it carries no role at all, because a visitor has none.
+   */
+  readonly principal: Principal;
   readonly message: string;
   readonly context: readonly ContextBlock[];
   readonly runId: string | null;
@@ -150,7 +156,7 @@ export class AgentRuntime {
     const available = callableTools(this.registry, {
       agentAllowlist: agent.allowlist,
       agentPermissionLevel: agent.permissionLevel,
-      userRole: request.userRole,
+      principal: request.principal,
     });
 
     const prompt = assemblePrompt({
@@ -236,7 +242,7 @@ export class AgentRuntime {
       agentAllowlist: agent.allowlist,
       agentPermissionLevel: agent.permissionLevel,
       agentEnabled: agent.enabled,
-      userRole: request.userRole,
+      principal: request.principal,
     });
 
     if (!decision.allowed) {
@@ -317,7 +323,7 @@ export class AgentRuntime {
 
     try {
       const output = await definition.execute(parsed.data, {
-        tenant: request.tenant,
+        scope: request.scope,
         runId: request.runId,
         requestId: request.requestId,
       });
@@ -359,7 +365,7 @@ export class AgentRuntime {
         observed: {
           toolName: call.toolName,
           outcome: 'ok',
-          observation: truncate(JSON.stringify(validated.data)),
+          observation: observe(validated.data),
         },
       };
     } catch (error) {
@@ -389,7 +395,20 @@ function describeIssues(error: z.ZodError): string {
     .join('; ');
 }
 
-function truncate(text: string): string {
+/**
+ * Turn a validated tool result into an observation for the model.
+ *
+ * A tool result is the main way third-party text enters the loop: a knowledge
+ * search returns passages from documents anyone in the organization uploaded,
+ * and a chatbot visitor's own question decides which ones. So the same
+ * delimiter neutralisation applied to retrieved context is applied here.
+ *
+ * As always (see prompt.ts), this RAISES THE COST of an injection and is not
+ * the control that stops one. The control is that `authorizeToolCall` does not
+ * consult anything reachable from this string.
+ */
+function observe(value: unknown): string {
+  const text = neutraliseUntrusted(JSON.stringify(value));
   return text.length <= MAX_OBSERVATION_CHARS
     ? text
     : `${text.slice(0, MAX_OBSERVATION_CHARS)}…[truncated]`;

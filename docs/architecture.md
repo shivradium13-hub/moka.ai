@@ -242,6 +242,42 @@ Marketplace agents (§26) pass through the identical gate. Being "official" gran
 
 ---
 
+## 6b. Customer chatbots (§22–§24)
+
+The public chatbot reuses the agent runtime above rather than a simplified copy, because the internet-facing path is the one that most needs the real authorisation gates. What differs is the principal and the tool set, and both differences are structural.
+
+```
+Visitor's browser
+  │  loader script on the customer's site (draws a launcher + iframe)
+  ▼
+Chat frame  ── our origin, strict CSP, frame-ancestors = deployment allowlist
+  │  x-moka-key: public deployment key      (names the tenant)
+  │  x-moka-visitor: conversation token     (names the conversation)
+  ▼
+POST /public/chat/*
+  │  resolveDeployment(key)   → narrow RLS policy, NO organization bound
+  │  assertOriginAllowed()    → advisory; frame-ancestors is the real control
+  │  resumeConversation()     → scoped to the organization the key resolved to
+  ▼
+CustomerContext  ── one organization, one conversation, NO ROLE
+  ▼
+AgentRuntime  ── customer principal, maxSteps 4, one read-only tool
+  │  search_knowledge, source allowlist captured in a CLOSURE
+  ▼
+decideGrounding(what retrieval ACTUALLY returned)
+  │  nothing retrieved + grounding required → discard the answer, refuse honestly
+  ▼
+Reply + citations derived from retrieval, never from the model's own account
+```
+
+**Handoff is a deterministic endpoint behind a button**, not a tool. A person asking for a person must not depend on a model agreeing, and keeping it out of the tool set is what lets the customer tool set stay strictly read-only — nothing the model can reach writes anything.
+
+**Cost containment matters more here than anywhere else**, because the spend lands on the organization that published the bot and the trigger is anyone who can load their home page. Bounds are constants rather than columns so no configuration mistake can raise them: 4 steps per turn, 12 replayed history messages, 60 messages per conversation, plus per-conversation and per-address rate limits from the deployment record.
+
+See `docs/security.md` §4.5 for the boundary in full.
+
+---
+
 ## 7. Multi-tenancy (§5)
 
 Three enforcement layers, defence in depth:

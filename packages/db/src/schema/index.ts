@@ -5,6 +5,7 @@ export * from './knowledge.js';
 export * from './usage.js';
 export * from './credentials.js';
 export * from './agents.js';
+export * from './chat.js';
 
 /**
  * Tables under Row-Level Security.
@@ -30,6 +31,11 @@ export const RLS_PROTECTED_TABLES: readonly string[] = [
   'agent_runs',
   'approvals',
   'tool_executions',
+  'chatbots',
+  'chatbot_sources',
+  'chatbot_deployments',
+  'chat_conversations',
+  'chat_messages',
 ];
 
 /**

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { Permission, SystemRole } from '@moka/core';
-import { authorizeToolCall, callableTools, DenialReason } from './authorize.js';
+import {
+  authorizeToolCall,
+  callableTools,
+  customerPrincipal,
+  DenialReason,
+  userPrincipal,
+} from './authorize.js';
 import { RiskLevel, defineTool, needsApproval, riskWithin, type ToolDefinition } from './tool.js';
 
 /**
@@ -64,7 +70,7 @@ function ask(overrides: {
     agentAllowlist: overrides.allowlist ?? [tool.name],
     agentPermissionLevel: overrides.level ?? RiskLevel.EXECUTE,
     agentEnabled: overrides.enabled ?? true,
-    userRole: overrides.role ?? SystemRole.OWNER,
+    principal: userPrincipal(overrides.role ?? SystemRole.OWNER),
   });
 }
 
@@ -275,7 +281,7 @@ describe('callableTools', () => {
     const names = callableTools(REGISTRY, {
       agentAllowlist: ['read_thing', 'draft_thing', 'destroy_thing'],
       agentPermissionLevel: RiskLevel.EXECUTE,
-      userRole: SystemRole.VIEWER,
+      principal: userPrincipal(SystemRole.VIEWER),
     }).map((tool) => tool.name);
 
     expect(names).toEqual(['read_thing']);
@@ -285,7 +291,7 @@ describe('callableTools', () => {
     const names = callableTools(REGISTRY, {
       agentAllowlist: ['read_thing', 'draft_thing', 'destroy_thing'],
       agentPermissionLevel: RiskLevel.DRAFT,
-      userRole: SystemRole.OWNER,
+      principal: userPrincipal(SystemRole.OWNER),
     }).map((tool) => tool.name);
 
     expect(names).toEqual(['read_thing', 'draft_thing']);
@@ -295,9 +301,173 @@ describe('callableTools', () => {
     const names = callableTools(REGISTRY, {
       agentAllowlist: ['read_thing', 'no_such_tool'],
       agentPermissionLevel: RiskLevel.EXECUTE,
-      userRole: SystemRole.OWNER,
+      principal: userPrincipal(SystemRole.OWNER),
     }).map((tool) => tool.name);
 
     expect(names).toEqual(['read_thing']);
+  });
+});
+
+/* ========================================================================== */
+/* SECURITY SUITE 8 (part 1) — the customer boundary                          */
+/*                                                                            */
+/* A chatbot visitor is an anonymous member of the public standing on someone  */
+/* else's website. These tests pin the claim that such a caller holds no       */
+/* authority — not "little authority", none — and that publishing a tool to    */
+/* them is an explicit act that cannot happen by omission.                     */
+/* ========================================================================== */
+
+/** A tool an organization has deliberately published to the public. */
+const publicTool = defineTool({
+  name: 'public_read_thing',
+  description: 'Reads something the organization chose to publish.',
+  inputSchema: z.object({}),
+  outputSchema: z.object({}),
+  permission: Permission.PROJECT_READ,
+  risk: RiskLevel.READ,
+  customerSafe: true,
+  execute: async () => ({}),
+});
+
+function askAsCustomer(overrides: {
+  tool?: ToolDefinition;
+  toolName?: string;
+  allowlist?: string[];
+  level?: RiskLevel;
+} = {}) {
+  const tool = overrides.tool ?? publicTool;
+  return authorizeToolCall({
+    tool,
+    toolName: overrides.toolName ?? tool.name,
+    agentAllowlist: overrides.allowlist ?? [tool.name],
+    agentPermissionLevel: overrides.level ?? RiskLevel.EXECUTE,
+    agentEnabled: true,
+    principal: customerPrincipal(),
+  });
+}
+
+describe('a customer holds no role', () => {
+  it('permits a tool explicitly published to the public', () => {
+    const decision = askAsCustomer();
+    expect(decision.allowed).toBe(true);
+  });
+
+  it('never gates a customer call on human approval', () => {
+    const decision = askAsCustomer();
+    if (!decision.allowed) throw new Error('expected permission');
+    /*
+     * An approval requested by an anonymous stranger is a denial of service
+     * against human attention: the deciding member has no way to judge who
+     * asked or why. Customer calls are permitted outright or refused outright.
+     */
+    expect(decision.requiresApproval).toBe(false);
+  });
+
+  it('refuses a read tool that was never marked customerSafe', () => {
+    // `read_thing` is harmless, allowlisted, read-only, and within the
+    // ceiling. It is refused solely because nobody published it.
+    const decision = askAsCustomer({ tool: readTool });
+    if (decision.allowed) throw new Error('expected denial');
+    expect(decision.reason).toBe(DenialReason.NOT_CUSTOMER_SAFE);
+  });
+
+  it('refuses a destructive tool even when the agent ceiling allows it', () => {
+    const decision = askAsCustomer({ tool: executeTool });
+    if (decision.allowed) throw new Error('expected denial');
+    expect(decision.reason).toBe(DenialReason.NOT_CUSTOMER_SAFE);
+  });
+
+  it('refuses a customerSafe tool that is not read-only', () => {
+    /*
+     * A registry mistake, caught at call time rather than at review time.
+     * The flag says yes and the risk says no; the risk wins, because
+     * publishability is derived from what the tool DOES, not from what its
+     * author remembered to annotate.
+     */
+    const misdeclared = defineTool({
+      name: 'misdeclared_thing',
+      description: 'Writes, but was wrongly published.',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+      permission: Permission.PROJECT_CREATE,
+      risk: RiskLevel.DRAFT,
+      customerSafe: true,
+      execute: async () => ({}),
+    });
+
+    const decision = askAsCustomer({ tool: misdeclared });
+    if (decision.allowed) throw new Error('expected denial');
+    expect(decision.reason).toBe(DenialReason.NOT_CUSTOMER_SAFE);
+  });
+
+  it('refuses a customerSafe read tool that opted into approval', () => {
+    const gated = defineTool({
+      name: 'gated_public_thing',
+      description: 'Read-only but deliberately gated.',
+      inputSchema: z.object({}),
+      outputSchema: z.object({}),
+      permission: Permission.PROJECT_READ,
+      risk: RiskLevel.READ,
+      customerSafe: true,
+      requiresApproval: true,
+      execute: async () => ({}),
+    });
+
+    const decision = askAsCustomer({ tool: gated });
+    if (decision.allowed) throw new Error('expected denial');
+    expect(decision.reason).toBe(DenialReason.NOT_CUSTOMER_SAFE);
+  });
+
+  it('still applies the allowlist and the agent ceiling to customers', () => {
+    expect(askAsCustomer({ allowlist: ['something_else'] })).toMatchObject({
+      allowed: false,
+      reason: DenialReason.NOT_ON_AGENT_ALLOWLIST,
+    });
+  });
+
+  it('does not leak which tools exist when refusing a stranger', () => {
+    const decision = askAsCustomer({ tool: executeTool });
+    if (decision.allowed) throw new Error('expected denial');
+    // The visitor learns that it is unavailable "in this conversation" —
+    // not that a delete tool exists and they were not permitted to use it.
+    expect(decision.message).not.toContain('destroy_thing');
+    expect(decision.message).not.toContain('permission');
+  });
+
+  it('a viewer outranks a customer: role absence is not a low role', () => {
+    /*
+     * The regression this pins. Modelling a visitor as `role: viewer` would
+     * make this pair identical. They must not be: a viewer may read projects,
+     * a stranger on the internet may not.
+     */
+    const asViewer = authorizeToolCall({
+      tool: readTool,
+      toolName: readTool.name,
+      agentAllowlist: [readTool.name],
+      agentPermissionLevel: RiskLevel.READ,
+      agentEnabled: true,
+      principal: userPrincipal(SystemRole.VIEWER),
+    });
+    const asCustomer = askAsCustomer({ tool: readTool, level: RiskLevel.READ });
+
+    expect(asViewer.allowed).toBe(true);
+    expect(asCustomer.allowed).toBe(false);
+  });
+});
+
+describe('callableTools for a customer', () => {
+  it('advertises only published tools, whatever the allowlist says', () => {
+    const registry = new Map<string, ToolDefinition>([
+      ...REGISTRY,
+      [publicTool.name, publicTool],
+    ]);
+
+    const names = callableTools(registry, {
+      agentAllowlist: ['read_thing', 'draft_thing', 'destroy_thing', 'public_read_thing'],
+      agentPermissionLevel: RiskLevel.EXECUTE,
+      principal: customerPrincipal(),
+    }).map((tool) => tool.name);
+
+    expect(names).toEqual(['public_read_thing']);
   });
 });

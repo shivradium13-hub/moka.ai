@@ -8,6 +8,7 @@ import { ProjectsModule } from './modules/projects/projects.module.js';
 import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
 import { AiModule } from './modules/ai/ai.module.js';
 import { AgentsModule } from './modules/agents/agents.module.js';
+import { ChatModule } from './modules/chat/chat.module.js';
 import { HealthModule } from './modules/health/health.module.js';
 import { AuthGuard } from './common/guards/auth.guard.js';
 import { TenantGuard } from './common/guards/tenant.guard.js';
@@ -38,6 +39,7 @@ import { HttpExceptionFilter } from './common/http-exception.filter.js';
     KnowledgeModule,
     AiModule,
     AgentsModule,
+    ChatModule,
     HealthModule,
   ],
   providers: [

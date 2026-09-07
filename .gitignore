@@ -30,6 +30,12 @@ coverage/
 /tmp/
 /local/
 *.local
+# The local storage driver writes uploaded files under the CWD of whichever
+# process ran, which for the API is apps/api. Anchored at the root only, the
+# rule above misses it — and uploaded documents are exactly what must not be
+# committed.
+**/local/
+
 
 # editors / OS
 .vscode/

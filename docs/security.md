@@ -151,7 +151,78 @@ Tenant scope is **injected server-side from `TenantContext`**. Tool schemas do n
 
 ### 4.5 Customer-facing chatbot boundary (§23)
 
-A public chatbot must never expose other customers' data, internal admin data, secrets, system prompts, or unrestricted database content. Order lookup and similar personal queries require the end customer to be authenticated, and authorization is checked against the *authenticated customer's* identity, not against an identifier supplied in the conversation.
+**Implemented in Phase 6.** Security suite 8 (`tests/security/customer-boundary.test.ts`).
+
+A public chatbot must never expose other customers' data, internal admin data, secrets, system prompts, or unrestricted database content.
+
+#### The principal
+
+A chatbot visitor is **not a user with a low role — they hold no role at all**. `CustomerContext` (in `@moka/core`) has no field from which a permission can be derived, so `hasPermission` is not merely uncalled on that path, it does not typecheck.
+
+The shortcut this refuses is modelling a visitor as `role: 'viewer'`. A viewer holds `project:read`, `organization:read` and `member:read`, so that one line would hand every passer-by on a customer's marketing site the ability to list the organization's projects and members — and the four-gate authoriser would permit it, correctly, having been told the caller was a viewer.
+
+`authorizeToolCall` therefore branches on a `Principal` union. On the customer branch there is no RBAC check because there is nothing to check with; instead a tool must satisfy three conditions, each of which **defaults to refusing**:
+
+| Condition | Why it is separate |
+|---|---|
+| `customerSafe === true` | Opt-in. A tool added to the platform is unreachable by the public until an author writes the flag and a reviewer sees it in a diff. |
+| `risk === READ` | Re-derives publishability from what the tool *does*, rather than trusting the annotation. Catches a mis-declared registry entry at call time. |
+| not approval-gated | An approval requested by an anonymous stranger is a denial of service against human attention, and the deciding member has no way to judge who asked. |
+
+#### Resolution order
+
+    public key   → deployment      (narrow RLS policy, no organization bound)
+    deployment   → organization    (from the row, never from the request)
+    visitor token + organization → conversation
+    conversation → CustomerContext, carrying no role
+
+Each step is scoped by the previous one, so presenting tenant A's key with tenant B's visitor token **finds nothing** rather than finding something and then rejecting it.
+
+The deployment lookup is the one place a tenant table is readable with no organization bound. It uses the same shape as `0002_user_scope.sql`: a narrow policy keyed on `app.current_deployment_key`, guarded by `current_org_id() IS NULL` so it is unreachable from inside any tenant-scoped transaction. `WITH CHECK` is not widened — the public path may read one row and write nothing.
+
+#### Two kinds of key
+
+| | Deployment key | Visitor token |
+|---|---|---|
+| Where it lives | The customer's page source | One browser's `sessionStorage` |
+| Secret? | **No.** Public by design. | **Yes**, for one conversation. |
+| Stored | Plaintext | SHA-256 hash, like a session token |
+| Grants | A fresh, empty conversation — what any visitor already has | Read and continue exactly one conversation, until it expires |
+
+#### The publication boundary
+
+`chatbot_sources` is the only knowledge a chatbot may quote, and retrieval on the public path goes through `searchWithinSources`, which **returns nothing for an empty allowlist**. The convention in `search()` that an empty `sourceIds` means "no restriction" is correct for a staff caller and is a leak on the public path; the two entry points exist so that difference cannot be got wrong by omission.
+
+The scope is a **closure, not a tool argument**. The model cannot widen it because there is no parameter naming it.
+
+#### Grounding
+
+Enforced **after** the run, against what retrieval actually returned — not against the model's account of itself. If nothing was retrieved and the chatbot requires grounding, the answer is discarded and replaced with a refusal however confident it was. Citations are likewise derived from what was retrieved; a model-supplied source list is plausible, not true, and a fabricated citation turns an unsupported answer into an apparently sourced one.
+
+#### Origin allowlist: two jobs, very different strength
+
+| Use | Strength |
+|---|---|
+| `frame-ancestors` on the chat frame | **Strong.** Enforced by the visitor's own browser; a third-party site cannot forge past it. |
+| Compared against the `Origin` header on API calls | **Weak.** `Origin` is browser-set and simply absent from `curl`. Stops casual reuse of a deployment on an unrelated site, and nothing more. |
+
+Conflating the two is the mistake to avoid. The security of the public surface rests on the role-less principal and the read-only, closure-scoped tool set — not on this list.
+
+#### Rendering
+
+The chat UI runs in a **cross-origin iframe on our origin**, not injected into the customer's DOM. Model output influenced by documents we did not write must never be rendered inside a customer's own origin, where an escaping mistake would become XSS on their site with their cookies. Inside the frame every message is placed with `textContent`; there is no `innerHTML`, no Markdown renderer, and the frame's CSP is `default-src 'none'` with `script-src 'self'` and a per-response style nonce.
+
+#### Known limitation
+
+Order lookup and similar personal queries — which would require the *end customer* to be authenticated, with authorization checked against that authenticated identity rather than an identifier supplied in the conversation — are **not implemented**. No customer-authentication mechanism exists yet, and no tool on the public path can read a personal record. That arrives with the business agents in Phase 7.
+
+#### Cross-tenant references and RLS
+
+PostgreSQL performs referential integrity checks **with row security disabled**. That is documented and deliberate: otherwise a foreign key would leak the existence of invisible rows through constraint violations. But it means a single-column `REFERENCES parent(id)` is satisfied by any row in the installation, visible or not, and an RLS policy that only checks the *child* row's `organization_id` will happily store a cross-tenant pointer.
+
+Suite 8 found exactly that on `chatbot_sources`. `0010_chat_tenant_integrity.sql` fixes it by carrying `organization_id` into the key itself: a composite `FOREIGN KEY (organization_id, source_id)` makes "the parent belongs to the same tenant" a referential constraint rather than a policy, which holds in the one place policies do not apply.
+
+**Known item:** the same shape exists on some earlier joins, `agent_tools.agent_id` among them. None leaks today — the referenced data is itself RLS-protected and the application layer checks ownership — but "two independent controls happen to save us" is not "this cannot happen". Converting the Phase 1–5 joins belongs in its own reviewed change rather than being folded into this phase.
 
 ---
 
@@ -237,11 +308,15 @@ These live in `tests/security/` and run against real PostgreSQL and Valkey in CI
 | 5 | Prompt injection | Injected instructions in documents, crawled pages, tool output and user messages fail to alter tool allowlists, permissions, credentials, approval requirements or egress targets |
 | 6 | SSRF | Every blocked range is rejected, including after redirect chains and rebinding attempts, across crawler, research, browser and MCP |
 | 7 | Arbitrary command execution | No path reaches host command execution; sandbox escape attempts fail |
-| 8 | API authorization | Scope enforcement, revocation, rate limits, and cross-organization key rejection |
+| 8 | Customer boundary | A chatbot visitor holds no role; reaches exactly one conversation in one organization; reads only explicitly published knowledge; and the widget ships no secret |
 | 9 | File access isolation | Uploaded files are reachable only within the owning organization; path traversal fails |
 | 10 | Knowledge isolation | Retrieval, citation and re-index paths never surface another organization's chunks |
 
-Suite 1 is the gate on Phase 1. Suite 10 is the gate on Phase 2.
+Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6.
+
+Suite 8 was originally scoped as "API authorization" (scopes, revocation, cross-organization key rejection). Those assertions did not disappear: the public deployment key IS the externally-presented key of this phase, and revocation, cross-organization rejection and rate limiting are all asserted against it. Programmatic API keys for staff integrations arrive with Phase 9.
+
+Every suite is **mutation-tested**: a control is removed, the suite is re-run, and it must fail. A security test that cannot fail is decoration. The records are in `docs/roadmap.md`.
 
 ---
 

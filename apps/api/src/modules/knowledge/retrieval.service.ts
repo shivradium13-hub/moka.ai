@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 import { Database } from '@moka/db';
 import { DATABASE } from '../../database/database.module.js';
-import type { TenantContext } from '@moka/core';
+import type { OrganizationScoped } from '@moka/core';
 import {
   RetrievalMode,
   parseQuery,
@@ -43,6 +43,16 @@ interface RawRow {
  *
  * That makes the fusion path real and exercised now; adding the dense list
  * later is one more entry in the same `reciprocalRankFusion` call.
+ *
+ * The scope parameter is `OrganizationScoped` rather than `TenantContext`
+ * because retrieval genuinely serves two kinds of caller: a staff agent, and a
+ * public chatbot answering a stranger. Widening it also REMOVES something —
+ * the union carries no role, so nothing in this file can make an authorisation
+ * decision about its caller. It scopes to an organization and does as it is
+ * told. Deciding WHICH sources a caller may reach is the job of whoever builds
+ * the query: for the public path that is `chatbot_sources`, and the honest
+ * consequence is that an empty `sourceIds` list here means NO restriction, so
+ * the public caller must never pass one.
  */
 @Injectable()
 export class RetrievalService {
@@ -57,7 +67,7 @@ export class RetrievalService {
     return first?.present ?? false;
   }
 
-  async search(context: TenantContext, query: RetrievalQuery): Promise<RetrievalResult> {
+  async search(context: OrganizationScoped, query: RetrievalQuery): Promise<RetrievalResult> {
     const started = Date.now();
     const parsed = parseQuery(query.text);
     const limit = Math.min(Math.max(query.limit, 1), 50);
@@ -110,6 +120,36 @@ export class RetrievalService {
   }
 
   /**
+   * Retrieval confined to an explicit list of sources, failing CLOSED.
+   *
+   * `search()` treats an empty `sourceIds` as "no restriction", which is the
+   * right default for a staff caller who may read everything. On the PUBLIC
+   * path that same default is a leak: a chatbot with no attached sources would
+   * search the organization's entire knowledge base and quote it to a
+   * stranger. The difference is one empty array.
+   *
+   * So the public path never calls `search()` directly. It calls this, which
+   * returns nothing when the allowlist is empty. That is also the honest
+   * answer — a chatbot nobody has attached anything to genuinely has nothing
+   * to say, and with grounding on it will say so.
+   */
+  async searchWithinSources(
+    context: OrganizationScoped,
+    sourceIds: readonly string[],
+    query: Omit<RetrievalQuery, 'sourceIds'>,
+  ): Promise<RetrievalResult> {
+    if (sourceIds.length === 0) {
+      return {
+        chunks: [],
+        mode: RetrievalMode.SPARSE_ONLY,
+        denseAvailable: await this.denseAvailable(),
+        tookMs: 0,
+      };
+    }
+    return this.search(context, { ...query, sourceIds: [...sourceIds] });
+  }
+
+  /**
    * Full-text branch.
    *
    * The `organization_id` predicate is present for the QUERY PLANNER, not for
@@ -118,14 +158,14 @@ export class RetrievalService {
    * suite proves that.
    */
   private async fullTextSearch(
-    context: TenantContext,
+    context: OrganizationScoped,
     tsquery: string | null,
     query: RetrievalQuery,
     limit: number,
   ): Promise<RawRow[]> {
     if (!tsquery) return [];
 
-    return this.db.withTenant(context, async (tx) => {
+    return this.db.withScope(context, async (tx) => {
       const result = await tx.execute<RawRow>(sql`
         SELECT
           c.id            AS chunk_id,
@@ -154,14 +194,14 @@ export class RetrievalService {
 
   /** Trigram branch: tolerates typos and matches substrings FTS would miss. */
   private async trigramSearch(
-    context: TenantContext,
+    context: OrganizationScoped,
     needle: string,
     query: RetrievalQuery,
     limit: number,
   ): Promise<RawRow[]> {
     if (needle.length < 3) return [];
 
-    return this.db.withTenant(context, async (tx) => {
+    return this.db.withScope(context, async (tx) => {
       const result = await tx.execute<RawRow>(sql`
         SELECT
           c.id            AS chunk_id,

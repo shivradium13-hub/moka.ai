@@ -102,6 +102,7 @@ packages/
   core/      Domain types, typed errors, RBAC, redaction.
   knowledge/ Parsers, chunking, retrieval, storage driver.
   agents/    Tool contracts, authorization, prompt isolation, runtime.
+  chat/      Customer-chatbot logic: origins, keys, grounding, the widget.
   ai/        Provider adapters, model registry, router, cost accounting.
   net/       safeFetch — the single SSRF-guarded egress point.
   config/    Zod-validated environment loader.
@@ -168,6 +169,64 @@ document and does exactly what it says. Nothing is deleted, because
 authorisation depends on the caller's role and the agent's allowlist, neither
 of which is reachable from any prompt. Consequential actions then pause for a
 human, and that approval authorises exactly one execution.
+
+---
+
+## Customer chatbots
+
+**A visitor is not a user with a low role. They hold no role at all.**
+
+A chatbot answers members of the public on the customer's own website. That
+makes them the first principal in the system who is not a member of any
+organization, and the design turns on refusing one tempting shortcut:
+modelling them as `role: 'viewer'`. A viewer can read projects and members, so
+that single line would publish an organization's internal list to every
+passer-by — and the authoriser would permit it, correctly, having been told the
+caller was a viewer.
+
+So `CustomerContext` carries no role. `hasPermission` on that path does not
+merely go uncalled; it does not typecheck. A tool is reachable by the public
+only if it is explicitly marked `customerSafe`, is read-only, and is not
+approval-gated — three conditions that each default to refusing, so publishing
+something to the internet takes a sentence rather than an omission.
+
+Four more things are structural rather than advisory:
+
+- **Publishing knowledge is an explicit act.** A chatbot can quote exactly the
+  sources attached to it and nothing else, and the retrieval call used on the
+  public path returns nothing for an empty list rather than falling back to
+  "no restriction". The scope is captured in a closure, so a model cannot
+  widen it — there is no argument naming it.
+- **Grounding is checked after the fact.** If retrieval returned nothing, the
+  answer is discarded and replaced with "I don't know" however confident the
+  model was. Asking it not to invent things is the nudge; this is the control.
+- **Citations come from what was retrieved**, never from what the model says it
+  used. A fabricated citation is worse than none — it turns an unsupported
+  answer into an apparently sourced one.
+- **Asking for a human is a button, not a tool.** The one request that must not
+  depend on a model agreeing to it, made most often by someone the bot has just
+  failed. Keeping it out of the tool set is also what lets that set stay
+  strictly read-only.
+
+The widget is two pieces: a small loader on the customer's page, and the chat
+UI in a cross-origin iframe on ours. Model output shaped by documents we did
+not write is never rendered inside a customer's origin, where an escaping
+mistake in our renderer would become XSS on their site. Inside the frame every
+message is set with `textContent` — no `innerHTML`, no Markdown renderer — and
+the frame's CSP is `default-src 'none'` with a per-response style nonce.
+
+The embed key **is public**, and is treated that way: it is stored in plaintext
+and shown in full, because it is about to be pasted into a page anyone can view
+the source of. It buys a fresh, empty conversation — exactly what any visitor
+already has. The per-conversation visitor token is the opposite, and is hashed
+at rest like a session token.
+
+An origin allowlist does two jobs of very different strength, and the code says
+so: it becomes `frame-ancestors` on the chat frame, which the visitor's own
+browser enforces and no third-party site can forge past; and it is compared
+against the `Origin` header on API calls, which any non-browser client can set
+to anything. The first is a real control. The second stops casual reuse and
+nothing more.
 
 ---
 
