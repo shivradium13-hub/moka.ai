@@ -137,6 +137,120 @@ describe('production hardening', () => {
     expect(findProductionViolations(env).join(' ')).toContain('CORS_ORIGINS');
   });
 
+  const prod = (overrides: Record<string, string | undefined>) =>
+    envSchema.parse(
+      validEnv({
+        NODE_ENV: 'production',
+        REDIS_URL: 'redis://v:6379',
+        DATABASE_SSL: 'true',
+        API_HOST: '0.0.0.0',
+        CORS_ORIGINS: 'https://app.example.com',
+        ...overrides,
+      }),
+    );
+
+  it('rejects a plaintext CORS origin, even a non-localhost one', () => {
+    // The localhost check above would miss `http://staging.example.com`, which
+    // is the same mistake with a domain name on it.
+    const message = findProductionViolations(
+      prod({ CORS_ORIGINS: 'https://app.example.com,http://staging.example.com' }),
+    ).join(' ');
+    expect(message).toContain('staging.example.com');
+    expect(message).toContain('unencrypted');
+  });
+
+  it('refuses to serve requests as the postgres superuser', () => {
+    /*
+     * The highest-consequence entry in this function. A superuser is not
+     * subject to RLS, so every isolation policy stops applying at once and
+     * nothing fails — which is precisely why a static check is worth having in
+     * addition to the runtime one in @moka/db.
+     */
+    const message = findProductionViolations(
+      prod({ DATABASE_URL: 'postgresql://postgres:pw@db.internal:5432/moka_ai' }),
+    ).join(' ');
+    expect(message).toContain('superuser');
+    expect(message).toContain('moka_app');
+  });
+
+  it('accepts the unprivileged application role', () => {
+    // The control. A check that flagged every DATABASE_URL would be removed.
+    expect(
+      findProductionViolations(prod({ DATABASE_URL: 'postgresql://moka_app:pw@db:5432/moka_ai' })),
+    ).toEqual([]);
+  });
+
+  it('refuses to run the application as the migration role', () => {
+    const url = 'postgresql://moka_migrator:pw@db:5432/moka_ai';
+    const message = findProductionViolations(
+      prod({ DATABASE_URL: url, DATABASE_MIGRATION_URL: url }),
+    ).join(' ');
+    expect(message).toContain('DISABLE ROW LEVEL SECURITY');
+  });
+
+  it('allows the two roles to differ, which is the intended arrangement', () => {
+    expect(
+      findProductionViolations(
+        prod({
+          DATABASE_URL: 'postgresql://moka_app:pw@db:5432/moka_ai',
+          DATABASE_MIGRATION_URL: 'postgresql://moka_migrator:pw@db:5432/moka_ai',
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('rejects instance-wide provider keys, which break per-tenant accounting', () => {
+    const message = findProductionViolations(prod({ ANTHROPIC_API_KEY: 'sk-ant-xxx' })).join(' ');
+    expect(message).toContain('ANTHROPIC_API_KEY');
+    expect(message).toContain('per-tenant cost');
+    // And it must not echo the key itself into an error that will be logged.
+    expect(message).not.toContain('sk-ant-xxx');
+  });
+
+  it('names every shared provider key that is set, not just the first', () => {
+    const message = findProductionViolations(
+      prod({ ANTHROPIC_API_KEY: 'a', OPENAI_API_KEY: 'b', GEMINI_API_KEY: 'c' }),
+    ).join(' ');
+    for (const name of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']) {
+      expect(message).toContain(name);
+    }
+  });
+
+  it('rejects debug logging in production', () => {
+    expect(findProductionViolations(prod({ LOG_LEVEL: 'debug' })).join(' ')).toContain('LOG_LEVEL');
+    expect(findProductionViolations(prod({ LOG_LEVEL: 'trace' })).join(' ')).toContain('LOG_LEVEL');
+    expect(findProductionViolations(prod({ LOG_LEVEL: 'info' }))).toEqual([]);
+  });
+
+  it('rejects a plaintext search URL on a public host', () => {
+    expect(
+      findProductionViolations(prod({ SEARXNG_URL: 'http://search.example.com' })).join(' '),
+    ).toContain('SEARXNG_URL');
+  });
+
+  it('permits a plaintext search URL on a private host, which is the normal setup', () => {
+    /*
+     * A self-hosted SearXNG usually sits on the same private network and is
+     * reached over http. Flagging that would push operators to disable the
+     * check rather than to fix anything.
+     */
+    for (const url of ['http://10.0.0.5:8080', 'http://searx.internal', 'http://127.0.0.1:8888']) {
+      expect({ url, problems: findProductionViolations(prod({ SEARXNG_URL: url })) }).toEqual({
+        url,
+        problems: [],
+      });
+    }
+  });
+
+  it('reports every problem at once, so one fix does not reveal the next', () => {
+    const env = envSchema.parse(
+      validEnv({ NODE_ENV: 'production', DATABASE_URL: 'postgresql://postgres:pw@db:5432/m' }),
+    );
+    const problems = findProductionViolations(env);
+    // REDIS_URL, DATABASE_SSL, API_HOST, localhost CORS, plaintext CORS, superuser.
+    expect(problems.length).toBeGreaterThanOrEqual(6);
+  });
+
   it('applies none of these checks outside production', () => {
     expect(findProductionViolations(envSchema.parse(validEnv()))).toEqual([]);
   });

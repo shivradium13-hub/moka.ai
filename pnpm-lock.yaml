@@ -130,6 +130,9 @@ importers:
       '@moka/db':
         specifier: workspace:*
         version: link:packages/db
+      '@moka/knowledge':
+        specifier: workspace:*
+        version: link:packages/knowledge
       '@moka/net':
         specifier: workspace:*
         version: link:packages/net

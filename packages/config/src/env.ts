@@ -155,6 +155,18 @@ export function findLeakyPublicVars(source: Record<string, string | undefined>):
 /* Production hardening                                                        */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Configuration that is survivable in development and dangerous in production.
+ *
+ * These are the settings where the failure is SILENT — nothing errors, nothing
+ * looks wrong, and the cost is paid later by somebody who cannot see the
+ * configuration. A misconfiguration that crashes needs no check here; it
+ * announces itself.
+ *
+ * Every entry below names the consequence rather than the rule, because the
+ * operator reading this message at 3am needs to decide whether to override it,
+ * and "DATABASE_SSL must be true" does not help them decide anything.
+ */
 export function findProductionViolations(env: Env): string[] {
   if (env.NODE_ENV !== 'production') return [];
   const problems: string[] = [];
@@ -174,5 +186,130 @@ export function findProductionViolations(env: Env): string[] {
   if (env.CORS_ORIGINS.some((o) => o.includes('localhost'))) {
     problems.push('CORS_ORIGINS contains a localhost origin in production.');
   }
+
+  /*
+   * A plaintext origin means the session cookie is sent in the clear. The
+   * cookie is `httpOnly` and `sameSite: lax`, neither of which helps against
+   * somebody reading the wire.
+   */
+  const insecureOrigins = env.CORS_ORIGINS.filter((o) => o.startsWith('http://'));
+  if (insecureOrigins.length > 0) {
+    problems.push(
+      `CORS_ORIGINS contains plaintext origins (${insecureOrigins.join(', ')}). ` +
+        'Session cookies would travel unencrypted to those sites.',
+    );
+  }
+
+  /*
+   * The cheap, static half of the runtime check in @moka/db.
+   *
+   * `assertRuntimeRoleIsConstrained` asks the server whether the role can
+   * bypass RLS, which is authoritative but requires a connection. This catches
+   * the most common form of the same mistake before one is opened, and names
+   * it as configuration rather than as a startup crash.
+   */
+  const dbUser = databaseUser(env.DATABASE_URL);
+  if (dbUser === 'postgres') {
+    problems.push(
+      'DATABASE_URL connects as "postgres", the superuser. Row-level security ' +
+        'does not apply to a superuser, so every tenant-isolation policy in the ' +
+        'database would stop applying — silently, with no request failing. ' +
+        'Use the unprivileged application role (moka_app).',
+    );
+  }
+  if (env.DATABASE_MIGRATION_URL && env.DATABASE_MIGRATION_URL === env.DATABASE_URL) {
+    problems.push(
+      'DATABASE_URL and DATABASE_MIGRATION_URL are the same connection. The ' +
+        'migration role owns the tables, and a table owner can run ALTER TABLE ' +
+        '... DISABLE ROW LEVEL SECURITY. Serving requests as that role means an ' +
+        'application bug can switch off tenant isolation. Keep the two roles separate.',
+    );
+  }
+
+  /*
+   * Instance-wide provider keys are a DEVELOPMENT convenience (see the schema
+   * above). In production they mean every organization spends the operator's
+   * key, so per-tenant cost attribution, per-tenant limits and per-tenant
+   * revocation all quietly stop being true.
+   */
+  const shared = (
+    [
+      ['ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY],
+      ['OPENAI_API_KEY', env.OPENAI_API_KEY],
+      ['GEMINI_API_KEY', env.GEMINI_API_KEY],
+    ] as const
+  )
+    .filter(([, value]) => Boolean(value))
+    .map(([name]) => name);
+  if (shared.length > 0) {
+    problems.push(
+      `Instance-wide provider keys are set (${shared.join(', ')}). Every ` +
+        "organization would spend the operator's key, and per-tenant cost " +
+        'attribution, quotas and revocation would all be fictional. Production ' +
+        'deployments use per-organization credentials (Moka Credentials).',
+    );
+  }
+
+  /*
+   * Debug logging is not a vulnerability by itself; it is how one is created.
+   * At `debug` and below this codebase logs request context that can carry
+   * user-supplied content, and logs are the place secrets end up when nobody
+   * intended them to.
+   */
+  if (env.LOG_LEVEL === 'debug' || env.LOG_LEVEL === 'trace') {
+    problems.push(
+      `LOG_LEVEL is "${env.LOG_LEVEL}" in production. Verbose logs capture ` +
+        'request context, and log storage is rarely protected as carefully as ' +
+        'the database it describes.',
+    );
+  }
+
+  /*
+   * A SearXNG instance reached over plaintext on a PUBLIC address exposes every
+   * research query to the path. Over a private address it is the normal
+   * self-hosted arrangement and is not flagged.
+   */
+  if (env.SEARXNG_URL?.startsWith('http://') && !isPrivateHostname(hostOf(env.SEARXNG_URL))) {
+    problems.push(
+      'SEARXNG_URL is a plaintext http:// URL on a public address. Every ' +
+        'research query would be readable in transit.',
+    );
+  }
+
   return problems;
+}
+
+/** Username from a postgres URL, or null if it carries none. */
+function databaseUser(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.username ? decodeURIComponent(parsed.username) : null;
+  } catch {
+    return null;
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A deliberately conservative literal check.
+ *
+ * This is NOT the SSRF defence — that one resolves DNS and inspects the
+ * address actually connected to, and lives in @moka/net. This only decides
+ * whether to nag an operator about plaintext, so a hostname that merely looks
+ * private is enough, and being wrong costs a spurious warning rather than a
+ * security hole.
+ */
+function isPrivateHostname(host: string): boolean {
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return true;
+  if (/^127\./.test(host) || host === '::1') return true;
+  if (/^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  return false;
 }

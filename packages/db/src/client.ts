@@ -2,6 +2,7 @@ import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sql } from 'drizzle-orm';
 import pg from 'pg';
 import {
+  ConfigurationError,
   TenantContextMissingError,
   InternalError,
   type CustomerContext,
@@ -18,6 +19,27 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Mirrors isDeploymentKeyFormat in @moka/chat. Duplicated rather than imported
  *  so that @moka/db does not depend on a package that depends on it. */
 const DEPLOYMENT_KEY_RE = /^moka_cb_[A-Za-z0-9_-]{20,64}$/;
+
+/** What a readiness probe learned about the database. */
+export interface DatabaseProbe {
+  /** The pool could execute a statement. */
+  readonly reachable: boolean;
+  /**
+   * Organization-scoped tables missing RLS, or `null` when the check could not
+   * be run. Empty means checked and clean; `null` means unknown.
+   */
+  readonly unprotectedTables: readonly string[] | null;
+}
+
+/**
+ * Drizzle's node-postgres driver returns a pg.Result; some paths return the
+ * rows directly. Normalising here keeps that detail out of the callers.
+ */
+function extractRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const rows = (result as { rows?: unknown }).rows;
+  return Array.isArray(rows) ? (rows as T[]) : [];
+}
 
 export interface DatabaseOptions {
   connectionString: string;
@@ -220,12 +242,132 @@ export class Database {
    * narrow RLS policies instead (see withUserScope and 0002_user_scope.sql).
    */
 
+  /**
+   * Refuse to run as a role that can bypass row-level security.
+   *
+   * ─────────────────────────────────────────────────────────────────────────
+   * THE ONE MISCONFIGURATION THAT SILENTLY DISABLES EVERYTHING
+   *
+   * Almost every tenant-isolation control in this system reduces to "the
+   * connecting role is subject to RLS". Point `DATABASE_URL` at a superuser —
+   * or at any role with BYPASSRLS — and every policy stops applying. Not
+   * some. All of them.
+   *
+   * Nothing would break. Every request would succeed. Every test that runs as
+   * `moka_app` would still pass. The application would serve every tenant's
+   * data to every tenant, and the only symptom would be a customer seeing
+   * somebody else's projects.
+   *
+   * It is a plausible mistake rather than an exotic one: `postgres://postgres@…`
+   * is what half the tutorials print, and it is what a hurried operator reaches
+   * for when a permission error blocks a deploy.
+   *
+   * So this is checked at BOOT and refuses to start, in every environment
+   * rather than only in production. A development database that quietly has no
+   * isolation is where the habit forms.
+   * ─────────────────────────────────────────────────────────────────────────
+   */
+  async assertRuntimeRoleIsConstrained(): Promise<void> {
+    const result = await this.db.execute<{
+      who: string;
+      rolsuper: boolean;
+      rolbypassrls: boolean;
+    }>(
+      sql`SELECT current_user AS who, rolsuper, rolbypassrls
+            FROM pg_roles WHERE rolname = current_user`,
+    );
+
+    const rows = (result as unknown as { rows?: Array<{ who: string; rolsuper: boolean; rolbypassrls: boolean }> })
+      .rows ?? (result as unknown as Array<{ who: string; rolsuper: boolean; rolbypassrls: boolean }>);
+    const role = Array.isArray(rows) ? rows[0] : undefined;
+
+    if (!role) {
+      throw new InternalError('Could not determine the database role this process connects as.');
+    }
+
+    if (role.rolsuper || role.rolbypassrls) {
+      throw new ConfigurationError(
+        [
+          `Refusing to start: the application connects as "${role.who}", which ` +
+            (role.rolsuper ? 'is a superuser.' : 'has BYPASSRLS.'),
+          '',
+          'Row-level security does not apply to such a role, so every tenant-isolation',
+          'policy in this database would stop applying — silently. Nothing would break,',
+          'every request would succeed, and every tenant would be served every other',
+          "tenant's data.",
+          '',
+          'Point DATABASE_URL at the unprivileged application role (moka_app).',
+          'See infra/db/bootstrap.sql and docs/operations.md.',
+        ].join('\n'),
+      );
+    }
+  }
+
   async healthCheck(): Promise<boolean> {
     try {
       await this.db.execute(sql`select 1`);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Readiness probe.
+   *
+   * ─────────────────────────────────────────────────────────────────────────
+   * WHY THIS ASKS MORE THAN "IS THE DATABASE UP"
+   *
+   * `SELECT 1` answers a question that is almost never the one that matters.
+   * A connection pool that can reach PostgreSQL tells you nothing about
+   * whether the database is in the shape this build expects, and the failure
+   * mode this system actually has is a migration that adds an organization-
+   * scoped table and forgets its RLS policy. That table is then readable
+   * across tenants, and every request against it succeeds.
+   *
+   * So readiness also asks the catalog a structural question: does every table
+   * carrying an `organization_id` have row-level security ENABLED and FORCED?
+   * Enabled alone is not enough — without FORCE, the table owner is exempt,
+   * and the migration role owns every table here.
+   *
+   * It is two cheap catalog scans against tables PostgreSQL keeps in memory,
+   * so a load balancer polling every few seconds costs effectively nothing.
+   * ─────────────────────────────────────────────────────────────────────────
+   */
+  async probe(): Promise<DatabaseProbe> {
+    try {
+      await this.db.execute(sql`select 1`);
+    } catch {
+      return { reachable: false, unprotectedTables: null };
+    }
+
+    try {
+      const result = await this.db.execute<{ relname: string }>(sql`
+        SELECT c.relname
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind = 'r'
+           AND EXISTS (
+                 SELECT 1 FROM pg_attribute a
+                  WHERE a.attrelid = c.oid
+                    AND a.attname = 'organization_id'
+                    AND a.attnum > 0
+                    AND NOT a.attisdropped
+               )
+           AND NOT (c.relrowsecurity AND c.relforcerowsecurity)
+         ORDER BY c.relname
+      `);
+
+      const rows = extractRows<{ relname: string }>(result);
+      return { reachable: true, unprotectedTables: rows.map((r) => r.relname) };
+    } catch {
+      /*
+       * Reachable but the structural question could not be answered. Reported
+       * as `null` rather than as `[]`: "I did not check" and "I checked and
+       * found nothing" must not look the same to whoever reads this.
+       */
+      return { reachable: true, unprotectedTables: null };
     }
   }
 

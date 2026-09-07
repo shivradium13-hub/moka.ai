@@ -487,22 +487,52 @@ These live in `tests/security/` and run against real PostgreSQL and Valkey in CI
 | 1 | Tenant isolation | Tenant A cannot read or write any Tenant B row, across every tenant table, including via forged `organization_id` in every request position |
 | 2 | Unauthorized tool execution | An agent cannot invoke a tool outside its configured allowlist, and cannot exceed its permission level |
 | 3 | Credential exposure | No API response, log line, trace, error or prompt contains a credential value |
-| 4 | Privilege escalation | A member cannot assume admin or owner capabilities; a key cannot widen its scopes |
+| 4 | Privilege escalation | A member cannot assume admin or owner capabilities; a key cannot widen its scopes. Plus: RLS is tenant isolation and NOT intra-tenant authorization, asserted by deliberately demonstrating the gap |
 | 5 | Prompt injection | Injected instructions in documents, crawled pages, tool output and user messages fail to alter tool allowlists, permissions, credentials, approval requirements or egress targets |
 | 6 | SSRF | Every blocked range is rejected, including after redirect chains and rebinding attempts — asserted through the CRAWLER and RESEARCH features, not only against `safeFetch` itself. Plus robots.txt compliance and the bounds of the configured-internal-host exception |
-| 7 | Arbitrary command execution | No path reaches host command execution; sandbox escape attempts fail |
+| 7 | Arbitrary command execution | No path reaches host command execution: the shipped source imports no `child_process`, `worker_threads` or `vm`, evaluates no string as code, and the real tool registry exposes nothing that runs anything. The sandbox half is **not** tested, because no sandbox exists — see below |
 | 8 | Customer boundary | A chatbot visitor holds no role; reaches exactly one conversation in one organization; reads only explicitly published knowledge; and the widget ships no secret |
-| 9 | File access isolation | Uploaded files are reachable only within the owning organization; path traversal fails |
+| 9 | File access isolation | Uploaded files are reachable only within the owning organization; path traversal fails by construction, because no user-controlled string ever reaches the filesystem |
 | 11 | Entitlement enforcement | Limits resolve from data with no code fallback; the application cannot edit the catalogue it is checked against; the credit ledger is append-only, sign-checked and reconciles against the cached balance |
 | 10 | Knowledge isolation | Retrieval, citation and re-index paths never surface another organization's chunks |
 
-Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6. Suite 6 gates Phase 7, alongside the citation-integrity gate in §4.6. Suite 11 gates Phase 9.
+Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6. Suite 6 gates Phase 7, alongside the citation-integrity gate in §4.6. Suite 11 gates Phase 9. Suites 4, 7 and 9 complete the set in Phase 10, alongside the operational drills.
+
+### Suite 4 asserts a gap on purpose
+
+Most of this codebase leans on row-level security hard enough that "the database will catch it" becomes a reflex. For intra-tenant authorization it will not, and suite 4 says so with a test that **succeeds in promoting a member to owner** inside a bound tenant.
+
+The policy on `organization_members` checks the tenant and nothing else, which is exactly what a tenant-isolation policy should do. What stops an escalation is `PermissionGuard` for the route and `canAssignRole` / `canManageMember` for the change — two gates, neither in the database. Writing the gap down as a passing test means somebody who deletes an application check and finds the suites still green learns why from a test rather than from an incident.
+
+### Suite 7 tests an absence, which is a weaker claim than it looks
+
+§39 defines suite 7 as two things: no path reaches host command execution, and sandbox escape attempts fail. Only the first is testable here. There is no sandbox — the Phase 8 coding agent needs isolation that cannot be built on this machine — and §45 forbids shipping something that merely appears to sandbox.
+
+The current posture is strong for a reason worth stating precisely: the safest way to survive a sandbox escape is to have nothing to escape from. There is no `exec` to reach, no `vm` to escape, no `eval` for a prompt to talk its way into. Suite 7 keeps that true as services are added, and includes a test that **fails if `packages/sandbox` ever appears** — so whoever builds it has to replace the placeholder with real escape tests rather than inheriting a green tick.
+
+### Suite 9 tests construction, not filtering
+
+A storage key is built from server-generated UUIDs plus an extension allowlisted to `[a-z0-9]{1,8}`. The user's filename contributes the extension and nothing else, so traversal, absolute paths, NUL bytes, Windows device names and case-collision tricks are impossible **by construction**. Filtering is what you do when the dangerous value is still in your hand; suite 9 asserts that it never is.
 
 Suite 11 is numbered beyond the §39 list of ten because it tests a property the list did not anticipate: that the code cannot raise the limits it is checked against. That is an authorization question, not a billing one, and it belongs with the security suites rather than in a feature test.
 
 Suite 8 was originally scoped as "API authorization" (scopes, revocation, cross-organization key rejection). Those assertions did not disappear: the public deployment key IS the externally-presented key of this phase, and revocation, cross-organization rejection and rate limiting are all asserted against it. Programmatic API keys for staff integrations arrive with Phase 9.
 
 Every suite is **mutation-tested**: a control is removed, the suite is re-run, and it must fail. A security test that cannot fail is decoration. The records are in `docs/roadmap.md`.
+
+**Mutating a package requires rebuilding it.** The suites import `@moka/*` from `dist`, so editing source alone changes nothing the test can see. A mutation that appears "not caught" is almost always a stale build — this was observed during Phase 10 and is recorded because the false reassurance runs in the dangerous direction.
+
+### Operational drills
+
+Three further suites live in `tests/drills/` and run under `pnpm test:drill`. They are separate because they create and drop databases, need a superuser, and take tens of seconds — making the security suites depend on all three would make them something people skip.
+
+| Drill | Asserts |
+|---|---|
+| `backup-restore` | A dump taken the wrong way is silently empty under FORCE RLS; the restore preserves RLS, policies, ownership and the grants that make the ledgers append-only |
+| `readiness` | The process refuses to boot as a role that bypasses RLS; the readiness probe detects an organization-scoped table whose policy is missing or merely enabled rather than forced |
+| `reconcile` | The credit reconciler fires on a real divergence, and refuses to report on a connection that would see nothing |
+
+Each drill tests a control by making it fail for real — creating an unprotected table, planting a divergence, taking a bad backup — rather than by asserting the healthy case. A monitor that has never been observed to fire is not known to work.
 
 ---
 

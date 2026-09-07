@@ -18,7 +18,12 @@
     "db:generate": "pnpm --filter @moka/db run generate",
     "db:migrate": "pnpm --filter @moka/db run migrate",
     "db:seed": "pnpm --filter @moka/db run seed",
-    "format": "prettier --write \"**/*.{ts,tsx,json,md}\""
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
+    "test:drill": "vitest run --config tests/vitest.drills.config.ts",
+    "db:backup": "node infra/db/backup.mjs",
+    "db:restore": "node infra/db/restore.mjs",
+    "billing:reconcile": "node infra/billing/reconcile.mjs",
+    "bench": "node infra/bench/benchmark.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -28,6 +33,7 @@
     "@moka/core": "workspace:*",
     "@moka/crypto": "workspace:*",
     "@moka/db": "workspace:*",
+    "@moka/knowledge": "workspace:*",
     "@moka/net": "workspace:*",
     "@moka/research": "workspace:*",
     "@types/node": "^22.10.2",

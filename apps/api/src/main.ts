@@ -125,8 +125,22 @@ async function bootstrap(): Promise<void> {
 
   app.enableShutdownHooks();
 
-  // --- Graceful shutdown ---
   const database = app.get<Database>(DATABASE);
+
+  /*
+   * --- The one check that must happen before the first request ---
+   *
+   * Every tenant-isolation control in this system reduces to "the connecting
+   * role is subject to RLS". If DATABASE_URL points at a superuser, all of
+   * them stop applying at once and NOTHING breaks — every request succeeds,
+   * and every tenant is served every other tenant's data.
+   *
+   * A failure that loud deserves to happen at boot rather than in a support
+   * ticket, so the process refuses to listen.
+   */
+  await database.assertRuntimeRoleIsConstrained();
+
+  // --- Graceful shutdown ---
   const shutdown = async (signal: string): Promise<void> => {
     getLogger().warn({ signal }, 'shutting down');
     try {

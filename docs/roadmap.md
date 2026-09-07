@@ -1,11 +1,11 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 9 (SaaS) COMPLETE.** Phases 1–7 and 9 done. Phase 8 cannot
-> be built on this machine (no Hyper-V, no gVisor — see the caveat below).
-> Standing limits unchanged: no provider API key, so no live model call has
-> been made; pgvector unavailable, so retrieval is lexical (§B1); and no web
-> search engine configured, so research runs against supplied URLs (§B4).
-> Verified 2026-09-07.
+> **Status: Phase 10 (Production) COMPLETE.** Phases 1–7, 9 and 10 done.
+> Phase 8 cannot be built on this machine (no Hyper-V, no gVisor — see the
+> caveat below). Standing limits unchanged: no provider API key, so no live
+> model call has been made; pgvector unavailable, so retrieval is lexical
+> (§B1); and no web search engine configured, so research runs against
+> supplied URLs (§B4). Verified 2026-09-07.
 
 ---
 
@@ -768,6 +768,163 @@ The plan **numbers** are a plausible starting shape, not a pricing decision. Nob
 
 ---
 
+## Phase 10 — completion record
+
+**Gate met.** `pnpm verify` passes, `pnpm test:security` passes with the full
+eleven-suite set, and `pnpm test:drill` passes the three operational drills
+against a real PostgreSQL database using the production role model.
+
+| Check | Result |
+|---|---|
+| Typecheck | 26/26 tasks, strict mode, zero errors |
+| Lint | 14/14 packages, 0 errors, 0 warnings |
+| Unit tests | **773 passed** across 13 packages |
+| Build | 14/14 packages |
+| **Security suites** | **227 passed** across 11 suites — privilege escalation 17, command execution 7, file isolation 15 added |
+| **Operational drills** | **32 passed** across 3 drills — backup/restore 16, readiness 8, reconciliation 8 |
+
+The §39 suite set is now complete: suites 4, 7 and 9 close the last three.
+
+### The gate was "full security suite + restore drill". Both halves are met, and the phase found two real defects doing it.
+
+Neither was found by review. Both were found by tooling built during this
+phase, and — the point worth keeping — **neither would ever have produced an
+error message.** That is the characteristic failure mode of this architecture,
+and it is why the phase invested in probes rather than in more assertions
+about known-good paths.
+
+#### Finding 1 — `roles` had an `organization_id` and no policy
+
+Found by the readiness probe on its **first execution**.
+
+`roles` was created in `0001` with a nullable `organization_id`: `NULL` for the
+four system roles, a value reserved for the per-organization custom roles the
+design anticipates. It never got a policy, because on the day it was written
+every row was a system role and nothing could leak.
+
+Nothing was exposed. The first custom role anyone created would have been
+readable by every other tenant, with no request failing to indicate it.
+
+Fixed in `0014_roles_rls.sql`. `WITH CHECK` is deliberately stricter than
+`USING` — it refuses `NULL`, so that if a write grant is ever added the
+application still cannot mint a *system* role, which would be an escalation
+primitive rather than a disclosure.
+
+Review missed it for an understandable reason: `roles` does not read as a
+tenant table. It is a reference table that happens to have an optional tenant
+column. The probe makes no such judgement — it asks the catalog a mechanical
+question, and mechanical questions do not get tired.
+
+#### Finding 2 — the credit cache had drifted from the ledger
+
+Found by `pnpm billing:reconcile` on its **first execution**: a `$2.00` grant
+in the authoritative ledger against a cached balance of `$0.00`.
+
+Investigated properly rather than assumed. The SQL Drizzle emits for the grant
+path was captured and the equivalent statement run by hand: both are correct.
+**The cause was not reproduced in current code**, and the most likely
+explanation is a stale artifact from Phase 9 development, before the
+reconciliation fix recorded above. It is therefore *not* claimed to be fixed —
+no defect in current code was identified. What changed is that it is now
+detectable, which is the part that matters.
+
+### The check that would otherwise fail silently
+
+Every tenant-isolation control in this system reduces to "the connecting role
+is subject to RLS". Point `DATABASE_URL` at a superuser and every policy stops
+applying at once. Nothing errors, every request succeeds, every test that runs
+as `moka_app` still passes, and the only symptom is one customer seeing
+another's data.
+
+Two guards now exist. `findProductionViolations` refuses to boot in production
+if the URL names the `postgres` user or if the app and migration URLs are
+identical; `Database.assertRuntimeRoleIsConstrained()` asks the server directly
+and refuses to listen, **in every environment** — a development database that
+quietly has no isolation is where the habit forms.
+
+The drill asserts the refusal message names the *consequence*, not the rule. An
+operator reading "must not be a superuser" at 3am looks for the flag that turns
+the check off; one who reads that every tenant would be served every other
+tenant's data does not.
+
+### Mutation records
+
+| Suite | Control removed | Result |
+|---|---|---|
+| 4 — privilege escalation | `canAssignRole` relaxed from strictly-below-rank to below-or-equal | **2 failed** — lateral admin cloning and the 4×4 matrix |
+| 7 — command execution | `child_process` imported into `tool-backend.service.ts` | **1 failed** — the module ban |
+| 7 — command execution | `eval()` added to `packages/agents/src/parse.ts` | **1 failed** — the code-evaluation ban |
+| 9 — file isolation | `buildStorageKey` made to use the uploaded filename | **7 failed** across four describes |
+
+A methodology note worth recording, because it runs in the dangerous
+direction: the first mutation of suite 4 appeared **not to be caught**. The
+suites import `@moka/*` from `dist`, so editing source alone changes nothing
+the test can see. Rebuilding the package caught it immediately. A mutation that
+looks uncaught is usually a stale build — and believing the first result would
+have meant deleting a working test.
+
+### Readiness and liveness are deliberately different endpoints
+
+`/health` consults nothing. If it reported the database's state, a database
+outage would fail liveness on every instance, the orchestrator would restart
+all of them in a loop, and a recoverable outage would become a reconnect storm
+against a database already struggling. Conflating the two is the most common
+way a health check makes an incident worse.
+
+`/health/ready` consults dependencies and returns 503 when not ready. Its body
+carries coarse status only — no version, hostname, driver or error text —
+because it is unauthenticated. The detail an operator needs goes to the log,
+behind whatever protects the logs. `schema: "unknown"` is a third state on
+purpose: a check that could not run must not report as a check that passed.
+
+### Performance, honestly scoped
+
+Full numbers in `docs/performance.md`. The headline:
+
+**Row-level security costs about 1%.** Same `SELECT`, same round trip, with and
+without the policy: −0.8% at 5,000 rows, +0.9% at 20,000, +0.9% at 100,000. At
+the smallest size it measured slightly negative, which is the clearest possible
+statement that it is inside the noise floor.
+
+That matters commercially rather than technically. If isolation were expensive
+there would be pressure to weaken it for speed, and that pressure is better
+answered with a measurement than an assurance.
+
+The naïve comparison — whole tenant path against a bare `SELECT` — gives +104%
+at 5,000 rows and is documented **because somebody would compute it
+themselves**. It is three extra network round trips, not policy evaluation, and
+the proof is that it *shrinks* to +18% at 100,000 rows: a real per-row cost
+would grow.
+
+No requests-per-second figure is reported anywhere. Every meaningful request
+waits on a model provider, no provider key has ever existed on this machine,
+and a throughput number measured against a mock would be a fabrication with a
+decimal point on it (§45).
+
+### Deliverables
+
+| Artefact | What it is |
+|---|---|
+| `docs/security-audit.md` | The §39 audit: 6 findings, threat-model coverage table, accepted risks, and a section on why a self-audit is the weakest kind |
+| `docs/operations.md` | Runbook: deploy, backup, restore, failure recovery, monitoring |
+| `docs/performance.md` | Measured ratios, with what is deliberately not measured |
+| `infra/billing/reconcile.mjs` | Ledger reconciliation; reports, never writes |
+| `infra/bench/benchmark.mjs` | The benchmark above |
+| `packages/db/drizzle/0014_roles_rls.sql` | Finding 1 |
+| `tests/drills/readiness.test.ts` | Boot refusal + schema probe |
+| `tests/drills/reconcile.test.ts` | Proves the reconciler fires |
+
+### What Phase 10 did not close
+
+Unchanged and stated plainly (§45): there is still **no sandbox** (Phase 8
+needs a Linux host), **no live provider verification** (no key has ever been
+present), the Valkey rate limiter is still a `TODO`, file storage is still
+single-node, and retrieval is still lexical. `docs/security-audit.md` §7 records
+each as an accepted risk with its mitigation, rather than leaving them to be
+discovered.
+
+---
+
 ## 0. Blockers to clear before Phase 2
 
 Three environment gaps must be closed. **None of them block Phase 1**, so work can start immediately while these are arranged.
@@ -878,7 +1035,7 @@ Each phase closes only when its work is implemented, typed, tested, linted, buil
 | **7 — Business Agents** *(COMPLETE)* | Templates, Path C research pipeline, website crawler, agent builder | **Security suite 6 (SSRF)** ✅; no fabricated citations ✅ | Phases 5, 6 |
 | **8 — Advanced AI** | Coding agent, sandbox, browser agent, MCP, agent-to-agent | **Security suites 7, 9** | **B2 resolved + a Linux host** |
 | **9 — SaaS** *(COMPLETE)* | Plans, entitlements, credits, usage dashboard, enforcement, billing boundary | **Security suite 11** ✅; no hard-coded limits ✅ | Phase 5 |
-| **10 — Production** | Security audit, performance and load testing, backup and restore drill, failure recovery, deployment, monitoring | Full security suite + restore drill | All |
+| **10 — Production** *(COMPLETE)* | Security audit, performance and load testing, backup and restore drill, failure recovery, deployment, monitoring | **Full security suite (227) + restore drill** ✅; security audit published ✅ | All |
 
 ### Phase 8 caveat
 Phase 8 cannot be completed on the current machine. Windows 11 Home has no Hyper-V and no gVisor, so genuine isolation for AI-generated code is unavailable. Per §45 we will not ship a stub that merely appears to sandbox. The coding agent and sandbox stay explicitly marked TODO and disabled until a Linux host exists.

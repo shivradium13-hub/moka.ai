@@ -86,9 +86,22 @@ Runs typecheck → lint → unit tests → build. Then the database-backed suite
 pnpm test:security
 ```
 
-Both must pass. The security suites **fail rather than skip** when they cannot
-reach a database: a silently skipped isolation test turns a missing guarantee
-into a green build.
+And the operational drills:
+
+```bash
+pnpm test:drill
+```
+
+All three must pass. Every one of these suites **fails rather than skips** when
+it cannot reach a database: a silently skipped isolation test turns a missing
+guarantee into a green build.
+
+The drills are separate from the security suites because they create and drop
+databases and need a superuser connection — making the security suites depend
+on all that would make them something people skip. They test controls by
+making them fail for real: creating an organization-scoped table with no
+policy, planting a divergence in the credit ledger, taking a backup the wrong
+way. A monitor that has never been observed to fire is not known to work.
 
 ---
 
@@ -111,9 +124,14 @@ packages/
   crypto/    Envelope encryption, Argon2id, token hashing.
   db/        Drizzle schema, SQL migrations, RLS policies, seeds.
   tenancy/   Tenant context enforcement helpers.
-infra/db/    Bootstrap SQL and the dev cluster script.
-tests/       Security suites (run against real PostgreSQL).
-docs/        Architecture, security, database, roadmap.
+infra/
+  db/        Bootstrap SQL, dev cluster, backup and restore.
+  billing/   Credit-ledger reconciliation.
+  bench/     Isolation-overhead benchmark.
+tests/
+  security/  11 suites, against real PostgreSQL.
+  drills/    Backup/restore, readiness, reconciliation.
+docs/        Architecture, security, audit, operations, performance, roadmap.
 ```
 
 ---
@@ -437,6 +455,38 @@ Full detail in [docs/security.md](docs/security.md).
 
 ---
 
+## Running it in production
+
+Full runbook in [docs/operations.md](docs/operations.md). The one thing that
+matters most is short enough to repeat here.
+
+**The application must connect as `moka_app`, and `moka_app` must not be a
+superuser and must not hold `BYPASSRLS`.**
+
+Everything else in the system is recoverable. This is not. Every
+tenant-isolation control reduces to "the connecting role is subject to
+row-level security" — point `DATABASE_URL` at a superuser and every policy
+stops applying at once. Nothing errors. Every request succeeds. Every test that
+runs as `moka_app` still passes. The only symptom is one customer seeing
+another customer's data.
+
+The process therefore refuses to start if it detects such a role, in every
+environment rather than only in production. If a deploy fails with *"Refusing
+to start: the application connects as …"*, fix the connection string rather
+than working around it.
+
+Two more places where the obvious action is the wrong one, both explained in
+the runbook:
+
+- **`pg_dump` with `--enable-row-security` produces a successful-looking,
+  completely empty backup** under `FORCE ROW LEVEL SECURITY`. `pnpm db:backup`
+  checks the role rather than trusting the exit code.
+- **`pg_restore --no-acl` silently removes security controls.** The usage and
+  credit ledgers are append-only *because of their grants*, not because of
+  application logic. `pnpm db:restore` preserves them.
+
+---
+
 ## Scripts
 
 | Command | Purpose |
@@ -444,8 +494,13 @@ Full detail in [docs/security.md](docs/security.md).
 | `pnpm dev` | Run API and web app |
 | `pnpm verify` | typecheck → lint → test → build |
 | `pnpm test:security` | Security suites against real PostgreSQL |
+| `pnpm test:drill` | Backup/restore, readiness and reconciliation drills |
 | `pnpm db:migrate` | Apply SQL migrations |
 | `pnpm db:seed` | Seed roles, permissions and tenant fixtures |
+| `pnpm db:backup` | Dump the database (refuses a role that would produce an empty one) |
+| `pnpm db:restore` | Restore, preserving ownership, policies and grants |
+| `pnpm billing:reconcile` | Compare cached balances against the credit ledger |
+| `pnpm bench` | Measure the cost of row-level security |
 | `node infra/db/dev-cluster.mjs <init\|start\|stop\|status\|destroy>` | Manage the dev database |
 
 ---
@@ -455,4 +510,7 @@ Full detail in [docs/security.md](docs/security.md).
 - [docs/architecture.md](docs/architecture.md) — stack, dependency licensing, gateway and knowledge design, risks
 - [docs/security.md](docs/security.md) — threat model, tenant isolation, credentials, AI-specific controls
 - [docs/database.md](docs/database.md) — schema, conventions, migration safety
+- [docs/security-audit.md](docs/security-audit.md) — findings, threat-model coverage, accepted risks
+- [docs/operations.md](docs/operations.md) — deploy, backup, restore, failure recovery, monitoring
+- [docs/performance.md](docs/performance.md) — measured isolation overhead, and what is not measured
 - [docs/roadmap.md](docs/roadmap.md) — phase plan and blockers
