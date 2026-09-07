@@ -99,6 +99,20 @@ export const envSchema = z.object({
    * `configuredInternalHosts` in @moka/net for why a config-supplied private
    * host is categorically different from a request-supplied one.
    */
+  /*
+   * Whether an operator takes payment OUTSIDE this system — an invoice, a
+   * bank transfer, or a self-hosted deployment with no billing at all.
+   *
+   * With it set, an administrator can activate a paid plan and the audit log
+   * records that a HUMAN asserted the payment. Without it, plan upgrades are
+   * refused with an explanation, because no card processor is integrated and
+   * §45 forbids faking a payment confirmation.
+   *
+   * Defaults to false: a deployment that has configured nothing must not
+   * appear to accept payment.
+   */
+  BILLING_MANUAL_PAYMENTS: booleanish.default('false'),
+
   SEARXNG_URL: z
     .string()
     .url()

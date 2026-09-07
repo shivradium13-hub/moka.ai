@@ -10,6 +10,7 @@ import { AiModule } from './modules/ai/ai.module.js';
 import { AgentsModule } from './modules/agents/agents.module.js';
 import { ChatModule } from './modules/chat/chat.module.js';
 import { ResearchModule } from './modules/research/research.module.js';
+import { BillingModule } from './modules/billing/billing.module.js';
 import { HealthModule } from './modules/health/health.module.js';
 import { AuthGuard } from './common/guards/auth.guard.js';
 import { TenantGuard } from './common/guards/tenant.guard.js';
@@ -42,6 +43,7 @@ import { HttpExceptionFilter } from './common/http-exception.filter.js';
     AgentsModule,
     ChatModule,
     ResearchModule,
+    BillingModule,
     HealthModule,
   ],
   providers: [

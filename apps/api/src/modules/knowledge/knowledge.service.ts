@@ -9,7 +9,9 @@ import {
 } from '@moka/db';
 import { ConflictError, NotFoundError, type TenantContext } from '@moka/core';
 import { assertBelongsToTenant } from '@moka/tenancy';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
 import { AuditService } from '../../common/audit.service.js';
 
 export interface SourceDto {
@@ -47,6 +49,7 @@ export class KnowledgeService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   async listSources(context: TenantContext): Promise<SourceDto[]> {
@@ -93,6 +96,8 @@ export class KnowledgeService {
     },
     meta: { requestId?: string | undefined },
   ): Promise<SourceDto> {
+    await this.entitlements.requireQuota(context, Feature.KNOWLEDGE_SOURCES_MAX);
+
     const created = await this.db.withTenant(context, async (tx) => {
       const [row] = await tx
         .insert(knowledgeSources)

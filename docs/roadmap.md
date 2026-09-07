@@ -1,10 +1,11 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 7 (Business Agents) COMPLETE.** Phases 1–7 done, with two
-> standing limits unchanged: no provider API key exists here, so no live model
-> call has been made; and pgvector is unavailable, so retrieval is lexical
-> (§B1). A third is new and smaller: no web-search engine is configured, so
-> research runs against URLs a user supplies (§B4). Verified 2026-09-07.
+> **Status: Phase 9 (SaaS) COMPLETE.** Phases 1–7 and 9 done. Phase 8 cannot
+> be built on this machine (no Hyper-V, no gVisor — see the caveat below).
+> Standing limits unchanged: no provider API key, so no live model call has
+> been made; pgvector unavailable, so retrieval is lexical (§B1); and no web
+> search engine configured, so research runs against supplied URLs (§B4).
+> Verified 2026-09-07.
 
 ---
 
@@ -651,6 +652,122 @@ The **fetch, extract, robots and SSRF halves are verified against real sites**, 
 
 ---
 
+## Phase 9 — completion record
+
+**Gate met.** `pnpm verify` passes, and `pnpm test:security` passes against a real PostgreSQL 17 database including the new **security suite 11 — entitlement enforcement**.
+
+| Check | Result |
+|---|---|
+| Typecheck | 26/26 tasks, strict mode, zero errors |
+| Lint | 14/14 packages, 0 errors, 0 warnings |
+| Unit tests | **762 passed** (`@moka/billing` 64 new) |
+| Build | 14/14 packages |
+| **Security suites** | **181 passed** — entitlement enforcement 30 new |
+
+### The gate, and the thing it is easiest to misread
+
+"Entitlement enforcement tests; no hard-coded limits."
+
+Every commercial limit is a row, resolved at call time: override → plan → deny. There is deliberately **no third fallback to a code constant**, because that constant would be the hard-coded limit the design exists to remove, and it would take over silently the moment somebody forgot to seed a plan.
+
+But the gate does **not** mean every number becomes purchasable. Two kinds of limit live in this codebase and conflating them would be the worst possible reading:
+
+| | Examples | Where they live |
+|---|---|---|
+| **Entitlements** | agents, chatbots, AI credit, seats, storage | Database rows. Selling more of them is the business model. |
+| **Safety ceilings** | the public chatbot's 4-step budget, crawler page and depth maxima, SSRF blocked ranges, upload cap | **Constants, and they stay constants.** |
+
+Making a safety ceiling purchasable would mean selling a weaker security posture to whoever pays most — the enterprise tier would be the one whose chatbot can be driven into an unbounded loop by a stranger. `SAFETY_CEILINGS_ARE_NOT_ENTITLEMENTS` names them, and two tests assert none has become a feature key or a seeded row.
+
+### The escalation this had to rule out
+
+The thing being limited must not be able to raise its own limit — and that is a **grant**, not a code review:
+
+```sql
+GRANT SELECT ON plans, plan_entitlements, entitlement_overrides TO moka_app;
+```
+
+A bug able to `UPDATE plan_entitlements` would not be a limit bypass in one place. It would be every limit at once, silently, with the enforcement code still passing its own tests. Six tests in suite 11 assert the application cannot insert, update or delete a plan, an entitlement or an override — including trying to grant *itself* one.
+
+The consequence is deliberate: overrides are granted out of band by someone with database access. There is no self-service path to a higher limit, and the absence of an endpoint is backed by the absence of a privilege.
+
+### Counting at the moment of the check
+
+`currentUsage` runs a real `SELECT count(*)` every time rather than reading a cache. That is the difference between an enforced limit and a decorative one: with a cache, a customer at their limit can create one more of everything on every instance holding a stale count. It costs a query per creation, which is rare and is not on the per-token path.
+
+### The credit ledger
+
+`credit_transactions` is authoritative; `credits.balance_micro_usd` is a cache of its sum, because a pre-flight check on every provider call cannot sum a million rows. Suite 11 reconciles them.
+
+- Append-only: `SELECT` and `INSERT`, no `UPDATE`, no `DELETE`.
+- **Sign discipline is a database constraint.** A `debit` of +500 would silently add credit *and reconcile perfectly against a wrong balance* — obvious in review, invisible in production.
+- An adjustment must carry a reason; an unexplained one is indistinguishable from a mistake six months later.
+- Integer micro-dollars throughout.
+
+### Two honest limitations, handled rather than hidden
+
+**Concurrency.** The cost of a call is unknown until it returns, so the pre-check is a *balance* check and a burst can each pass it before any debits. The bound is one call per concurrent request. The debit is a single atomic `UPDATE` so none is lost; the balance is allowed to go **negative** because clamping would conceal the overspend; and the next pre-check refuses. Reserving a pessimistic maximum instead would make usable credit a fraction of what was bought.
+
+**Unpriced calls.** `estimateCost` returns null rather than inventing a figure when a model's pricing is missing. Charging a guess invents a number people budget against; charging zero silently makes that model free and unlimited — the cheapest possible exploit, since a customer need only use whichever model nobody has priced. So a zero-amount debit flagged `unpriced` is written, the balance pre-check still requires positive credit, and both the usage page and the plan panel say "N calls could not be priced". The gap surfaces as the registry bug it is.
+
+`0013_unpriced_debits.sql` exists because 0012's sign constraint — correct for every charging debit — forbade exactly this row. Relaxed in one direction only: a debit may be zero **if and only if** it is flagged unpriced.
+
+### Payment: not implemented, and not pretended
+
+§45 forbids a fake payment confirmation, and the most damaging instance would be here — activating a paid plan without money moving means real credit, real provider calls, no revenue.
+
+`UnavailablePaymentGateway` is the default and refuses with an explanation rather than queueing something that never completes. `ManualPaymentGateway` (`BILLING_MANUAL_PAYMENTS=true`) lets an administrator record that payment was arranged elsewhere — invoice billing and self-hosted deployments are how most likely customers would pay — and it is honest because a *person* asserts it, attributably, into the audit log and a log line that says "without an online payment".
+
+A downgrade to the free plan is always permitted without a gateway. Refusing a cancellation because no processor is configured would be a hostage-taking.
+
+### A real bug found during verification
+
+The model allowlist was checked inside the provider fallback loop. `planRoute` resolves credentials as part of choosing a model and throws before that loop is entered, so a caller asking for a model their plan excludes was told **"no credential is configured for anthropic"** — the wrong answer, and a small leak of which providers the deployment has.
+
+Architecture §4 puts entitlements at step 2 and credentials at step 3, and this is why that order is not decorative. An explicitly requested model is now checked before routing; the per-candidate check stays inside the loop, because the router may fall back to a model the plan excludes and checking only the primary would make the fallback path a way around the allowlist.
+
+### A second bug, in the seed
+
+`pnpm db:seed` had stopped being idempotent despite its own header promising it was. The cause is the same shape as the empty-membership bug from Phase 1: `SELECT id FROM organizations WHERE slug = $1` runs unbound, RLS correctly returns zero rows even when the row exists, and the seed then inserted a duplicate.
+
+Fixed with the narrow policy that already exists for exactly this — bind `app.current_user_id` and read the organizations that user belongs to (`0002_user_scope.sql`). No new privilege and no RLS exception.
+
+### Mutation testing
+
+| Mutation | Result |
+|---|---|
+| `GRANT INSERT, UPDATE, DELETE` on the catalogue to `moka_app` | **8 security tests failed** — every "cannot edit" case, plus the resolution tests once a mutation wrote a row |
+| A missing entitlement row resolves to `unlimited` | **3 unit tests failed** |
+
+### Verified end to end against the running stack
+
+- A new organization lands on the **free** plan with a $2.00 allowance, both taken from the catalogue by key rather than written in code
+- Second chatbot → `402 QUOTA_EXCEEDED`, *"Your plan includes 1 chatbots. You are using 1."*
+- Third agent → `402`; fourth project → `402`, each naming the limit and current usage so a UI can render an upgrade prompt rather than a wall
+- A model the free plan excludes → `402` **before** any provider is contacted
+- A drained balance → `402` on a permitted model, before the credential is resolved
+- Plan change with no processor → `changed: false` and a message saying plainly that nothing was charged
+- With `BILLING_MANUAL_PAYMENTS=true`, an administrator activation succeeds, the new limits apply immediately from data, and the log records the acting user id beside *"subscription activated without an online payment"*
+
+### Deliberately not built
+
+| Not built | Why |
+|---|---|
+| A Stripe (or any) card adapter | Real money movement is a per-transaction fee, not a licensing problem — it is simply not built, and §45 forbids faking the confirmation. The interface and the webhook requirements are written down where whoever implements it will read them. |
+| A self-service "add credit" endpoint | It would be a self-service way to spend somebody else's provider quota. |
+| An admin UI for entitlement overrides | An override raising your own limit is the escalation this phase exists to prevent. Granting one is a database action by someone with database access. |
+| A scheduled monthly allowance | The job queue needs Valkey, which needs Docker (§B2). The endpoint exists, is idempotent per period, and the UI says plainly that allowances are issued on demand — an operator who believed they renewed automatically would find out from an outage. |
+| Seat enforcement | The count query and the entitlement exist, but there is no invitation flow yet, so there is no creation path to enforce at. Enforcing nothing would be worse than saying so. |
+| `usage_records` monthly partitioning | Planned in `docs/database.md` and still not done. A performance item for Phase 10, not a correctness one. |
+
+### Not verified
+
+**No live provider call has been made**, so no credit has ever been debited from a real cost. The debit path is exercised by unit tests and by the pre-check refusing at zero; what a real token bill does to the balance is unknown.
+
+The plan **numbers** are a plausible starting shape, not a pricing decision. Nobody has done the unit economics, and the free tier's $2 allowance in particular is a guess at "enough to evaluate the product". Presenting them as considered would be the false precision this codebase avoids elsewhere.
+
+---
+
 ## 0. Blockers to clear before Phase 2
 
 Three environment gaps must be closed. **None of them block Phase 1**, so work can start immediately while these are arranged.
@@ -760,7 +877,7 @@ Each phase closes only when its work is implemented, typed, tested, linted, buil
 | **6 — Customer Chatbot** *(COMPLETE)* | Builder, widget bundle, deployments, support agent, customer boundary, handoff | **Security suite 8** ✅; widget contains no secret ✅ | Phase 5 |
 | **7 — Business Agents** *(COMPLETE)* | Templates, Path C research pipeline, website crawler, agent builder | **Security suite 6 (SSRF)** ✅; no fabricated citations ✅ | Phases 5, 6 |
 | **8 — Advanced AI** | Coding agent, sandbox, browser agent, MCP, agent-to-agent | **Security suites 7, 9** | **B2 resolved + a Linux host** |
-| **9 — SaaS** | Plans, entitlements, credits, usage dashboard, enforcement, billing adapter | Entitlement enforcement tests; no hard-coded limits | Phase 5 |
+| **9 — SaaS** *(COMPLETE)* | Plans, entitlements, credits, usage dashboard, enforcement, billing boundary | **Security suite 11** ✅; no hard-coded limits ✅ | Phase 5 |
 | **10 — Production** | Security audit, performance and load testing, backup and restore drill, failure recovery, deployment, monitoring | Full security suite + restore drill | All |
 
 ### Phase 8 caveat

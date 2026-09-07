@@ -2,8 +2,10 @@
  * Seed script.
  *
  * Two responsibilities:
- *   1. Mirror the code-defined roles and permissions into the database, so
- *      `organization_members.role_key` has referential integrity.
+ *   1. Mirror the code-defined roles, permissions and PLAN CATALOGUE into the
+ *      database. After this runs the database is authoritative — nothing in
+ *      the application reads the definitions in @moka/billing again, which is
+ *      what makes "no hard-coded limits" true rather than aspirational.
  *   2. Create two fully-populated organizations with NO overlap, which the
  *      tenant-isolation security suite uses as its fixtures.
  *
@@ -13,12 +15,13 @@
  * is constrained. Every tenant insert below therefore runs inside a bound
  * transaction, exactly like application code.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import pg from 'pg';
 import { ALL_ROLES, Permission, ROLE_PERMISSIONS, SystemRole } from '@moka/core';
+import { DEFAULT_PLANS, FEATURE_UNITS, type Feature } from '@moka/billing';
 import { hashPassword, generateDek, loadRootKey, wrapDek } from '@moka/crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,11 +94,6 @@ async function seedOrganization(
   rootKey: Buffer,
   params: { slug: string; name: string; ownerEmail: string; ownerName: string; projectSlug: string },
 ): Promise<SeededOrg> {
-  const existing = await client.query<{ id: string }>(
-    'SELECT id FROM organizations WHERE slug = $1',
-    [params.slug],
-  );
-
   // The owner user is global, so it is created outside the tenant transaction.
   const passwordHash = await hashPassword('CorrectHorseBattery1!');
   const userResult = await client.query<{ id: string }>(
@@ -107,8 +105,29 @@ async function seedOrganization(
   );
   const ownerUserId = userResult.rows[0]!.id;
 
-  if (existing.rows.length > 0) {
-    const organizationId = existing.rows[0]!.id;
+  /*
+   * Find the organization by slug, if it is already there.
+   *
+   * `SELECT ... WHERE slug = $1` with nothing bound returns zero rows under
+   * FORCE ROW LEVEL SECURITY even when the row exists — the same shape as the
+   * empty-membership bug from Phase 1 — and the seed then tried to insert a
+   * duplicate, which is why re-running it stopped working despite the promise
+   * of idempotency at the top of this file.
+   *
+   * The fix is the narrow policy that already exists for exactly this: bind
+   * `app.current_user_id` and read the organizations that user belongs to
+   * (0002_user_scope.sql). No new privilege, no RLS exception.
+   */
+  const existing = await bindUser(client, ownerUserId, async () => {
+    const r = await client.query<{ id: string }>(
+      'SELECT id FROM organizations WHERE slug = $1',
+      [params.slug],
+    );
+    return r.rows;
+  });
+
+  if (existing.length > 0) {
+    const organizationId = existing[0]!.id;
     const project = await bindOrg(client, organizationId, async () => {
       const r = await client.query<{ id: string }>(
         'SELECT id FROM projects WHERE organization_id = $1 AND slug = $2',
@@ -123,7 +142,7 @@ async function seedOrganization(
 
   // Pre-generate the id: the organizations RLS policy checks the row's own id
   // against the bound context, so the context must be set before the INSERT.
-  const organizationId = existing.rows[0]?.id ?? randomUUID();
+  const organizationId = deterministicOrgId(params.slug);
   const dekWrapped = wrapDek(rootKey, generateDek(), organizationId).toString('base64');
 
   const projectId = await bindOrg(client, organizationId, async () => {
@@ -168,6 +187,96 @@ async function seedOrganization(
 }
 
 /** Run a callback with app.current_org_id bound, mirroring Database.withTenant. */
+/**
+ * Mirror the default plan catalogue into `plans` and `plan_entitlements`.
+ *
+ * SEED, not source of truth. After this runs an operator changes what a plan
+ * includes with an UPDATE, and re-running the seed does not clobber that —
+ * plans are inserted ON CONFLICT DO NOTHING, and entitlements only for plans
+ * this seed just created.
+ *
+ * That asymmetry is deliberate. A seed that reset every limit on every deploy
+ * would quietly undo every negotiated arrangement, which is the sort of thing
+ * discovered from a customer's invoice.
+ */
+async function seedPlans(client: pg.Client): Promise<void> {
+  for (const plan of DEFAULT_PLANS) {
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO plans (key, name, description, price_monthly_cents, currency, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (key) DO NOTHING
+       RETURNING id`,
+      [
+        plan.key,
+        plan.name,
+        plan.description,
+        plan.priceMonthlyCents,
+        plan.currency,
+        plan.sortOrder,
+      ],
+    );
+
+    // Already present: leave its entitlements exactly as the operator has them.
+    if (inserted.rowCount === 0) continue;
+    const planId = inserted.rows[0]!.id;
+
+    for (const entitlement of plan.entitlements) {
+      await client.query(
+        `INSERT INTO plan_entitlements (plan_id, feature_key, limit_value, allowed_values, unit)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          planId,
+          entitlement.featureKey,
+          entitlement.limitValue,
+          entitlement.allowedValues ?? null,
+          FEATURE_UNITS[entitlement.featureKey as Feature] ?? 'count',
+        ],
+      );
+    }
+  }
+}
+
+/**
+ * A stable UUID for a fixture organization, derived from its slug.
+ *
+ * Not a security boundary and not used for real organizations, which get
+ * `randomUUID()`. It exists so the seed can bind an organization it has not
+ * yet read — see the comment in `seedOrganization`.
+ */
+function deterministicOrgId(slug: string): string {
+  const digest = createHash('sha256').update(`moka.seed.org:${slug}`).digest('hex');
+  // Shape the digest as a v4-looking UUID. The version and variant nibbles are
+  // set so the value is a well-formed UUID, which the UUID_RE guard in
+  // @moka/db requires.
+  return [
+    digest.slice(0, 8),
+    digest.slice(8, 12),
+    `4${digest.slice(13, 16)}`,
+    `${((parseInt(digest[16]!, 16) & 0x3) | 0x8).toString(16)}${digest.slice(17, 20)}`,
+    digest.slice(20, 32),
+  ].join('-');
+}
+
+/**
+ * Bind a USER rather than an organization, mirroring Database.withUserScope.
+ *
+ * The only thing this makes visible is the set of organizations that user
+ * belongs to — the narrow policy added in 0002_user_scope.sql, guarded by
+ * `current_org_id() IS NULL` so it cannot widen a tenant-scoped read.
+ */
+async function bindUser<T>(client: pg.Client, userId: string, fn: () => Promise<T>): Promise<T> {
+  await client.query('BEGIN');
+  try {
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId]);
+    const result = await fn();
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
+}
+
 async function bindOrg<T>(client: pg.Client, organizationId: string, fn: () => Promise<T>): Promise<T> {
   await client.query('BEGIN');
   try {
@@ -200,6 +309,7 @@ async function main(): Promise<void> {
   try {
     console.warn('Seeding roles and permissions…');
     await seedRolesAndPermissions(client);
+    await seedPlans(client);
 
     console.warn('Seeding tenant fixtures…');
     const tenantA = await seedOrganization(client, rootKey, {

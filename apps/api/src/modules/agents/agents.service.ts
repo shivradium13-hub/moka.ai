@@ -11,8 +11,10 @@ import {
   type TenantContext,
 } from '@moka/core';
 import type { RiskLevel, ToolDefinition } from '@moka/agents';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
 import { AuditService } from '../../common/audit.service.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
 
 export interface AgentDto {
   id: string;
@@ -31,6 +33,7 @@ export class AgentsService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   async list(context: TenantContext): Promise<AgentDto[]> {
@@ -93,6 +96,11 @@ export class AgentsService {
     registry: ReadonlyMap<string, ToolDefinition>,
     meta: { requestId?: string | undefined },
   ): Promise<AgentDto> {
+    // The plan limit, counted now. Checked BEFORE the per-tool permission
+    // check so a customer at their limit is told that, rather than being told
+    // about a tool they cannot grant on an agent they cannot create.
+    await this.entitlements.requireQuota(context, Feature.AGENTS_MAX);
+
     for (const toolName of input.tools) {
       const tool = registry.get(toolName);
       if (!tool) throw new ValidationError({ tools: `Unknown tool "${toolName}".` });

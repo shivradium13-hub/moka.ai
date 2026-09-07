@@ -16,8 +16,10 @@ import {
   type TenantContext,
 } from '@moka/core';
 import { ChatRole, generateDeploymentKey, parseAllowedOrigin, visitorLabel } from '@moka/chat';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
 import { AuditService } from '../../common/audit.service.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
 
 /**
  * Staff-side chatbot management (§22).
@@ -66,6 +68,7 @@ export class ChatbotsService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   /* ---------------------------------------------------------------------- */
@@ -128,6 +131,8 @@ export class ChatbotsService {
     },
     meta: { requestId?: string | undefined },
   ): Promise<ChatbotDto> {
+    await this.entitlements.requireQuota(context, Feature.CHATBOTS_MAX);
+
     const id = await this.db.withTenant(context, async (tx) => {
       const [row] = await tx
         .insert(chatbots)
@@ -351,6 +356,9 @@ export class ChatbotsService {
     meta: { requestId?: string | undefined },
   ): Promise<DeploymentDto> {
     await this.get(context, chatbotId);
+    // Counted across the organization, not per chatbot: a deployment is a
+    // published surface, and the plan sells a number of them.
+    await this.entitlements.requireQuota(context, Feature.CHATBOT_DEPLOYMENTS_MAX);
 
     /*
      * Origins are normalised and validated BEFORE storage, so the stored list

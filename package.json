@@ -23,6 +23,7 @@
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@moka/agents": "workspace:*",
+    "@moka/billing": "workspace:*",
     "@moka/chat": "workspace:*",
     "@moka/core": "workspace:*",
     "@moka/crypto": "workspace:*",

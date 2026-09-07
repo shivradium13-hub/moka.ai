@@ -12,6 +12,8 @@ import {
 import { loadConfig } from '@moka/config';
 import { DATABASE } from '../../database/database.module.js';
 import { AuditService } from '../../common/audit.service.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
+import { CreditsService } from '../billing/credits.service.js';
 
 export interface RegisteredUser {
   userId: string;
@@ -25,6 +27,8 @@ export class AuthService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
+    private readonly credits: CreditsService,
   ) {}
 
   /** Emails are stored normalised so the unique index is meaningful. */
@@ -115,6 +119,20 @@ export class AuthService {
       userId: created.id,
       role: SystemRole.OWNER,
     });
+
+    /*
+     * A new organization gets a subscription to the DEFAULT PLAN, by key, and
+     * its first period's credit allowance from whatever that plan currently
+     * says. Neither number is written here — an operator who edits the free
+     * plan changes what new signups receive without a deployment.
+     *
+     * Both are best-effort. A registration that succeeded must not be undone
+     * because the plan catalogue was unseeded; the organization would simply
+     * be refused everything until an operator noticed, which is a safe failure
+     * rather than a lost account. `ensureSubscription` logs loudly in that case.
+     */
+    await this.entitlements.ensureSubscription(context);
+    await this.credits.grantPeriodAllowance(context);
 
     await this.audit.record(context, {
       action: 'auth.register',

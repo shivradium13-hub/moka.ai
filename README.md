@@ -104,6 +104,7 @@ packages/
   agents/    Tool contracts, authorization, prompt isolation, runtime.
   chat/      Customer-chatbot logic: origins, keys, grounding, the widget.
   research/  Citation ledger, crawl policy, search providers, Path C pipeline.
+  billing/   Plans, entitlements, the credit ledger, the payment boundary.
   ai/        Provider adapters, model registry, router, cost accounting.
   net/       safeFetch and robots.txt — the guarded egress point.
   config/    Zod-validated environment loader.
@@ -325,6 +326,92 @@ bytes into another tenant's row and confirming it will not decrypt.
 Only a non-reversible fingerprint and the last four characters are stored for
 display. The plaintext appears in no column, no log, no audit record and no
 API response — each of which is asserted by a test.
+
+---
+
+## Plans, limits and credit
+
+**No limit is written in the code.** Every commercial limit is a row, resolved
+when it is checked: a per-organization override, then the plan, then denial.
+There is deliberately no third fallback to a constant — that constant would be
+the hard-coded limit this design exists to remove, and it would take over
+silently the moment a plan was unseeded.
+
+A limit has three states, and collapsing any two of them is a real bug:
+
+| Value | Meaning |
+|---|---|
+| a number | that many |
+| `null` | **unlimited** — not zero |
+| no row | **not included** — the plan does not offer it |
+
+`limit ?? 0` breaks every customer on an unlimited plan. `limit ?? Infinity`
+gives the product away. The type models all three so neither is expressible.
+
+Counting happens **at the moment of the check** — a real `SELECT count(*)`,
+never a cache. With a cache, a customer at their limit can create one more of
+everything on every instance holding a stale count.
+
+### The application cannot raise its own limit
+
+This is a database grant, not a code review:
+
+```sql
+GRANT SELECT ON plans, plan_entitlements, entitlement_overrides TO moka_app;
+```
+
+A bug able to `UPDATE plan_entitlements` would not be a limit bypass in one
+place — it would be every limit at once, silently, with the enforcement code
+still passing its own tests. Overrides are granted out of band by someone with
+database access; there is no self-service path to a higher limit, and the
+absence of an endpoint is backed by the absence of a privilege.
+
+### Entitlements are not safety ceilings
+
+Agents, chatbots, credit and seats are the plan, and selling more of them is
+the business model. The public chatbot's 4-step budget, the crawler's page
+ceiling, the SSRF blocked ranges and the upload cap are **not for sale** and
+stay constants. Making one purchasable would mean selling a weaker security
+posture to whoever pays most — the enterprise tier would be the one whose
+chatbot can be driven into an unbounded loop by a stranger.
+
+### The credit ledger
+
+`credit_transactions` is the record; the balance is a **cache** of its sum,
+because a check on every provider call cannot sum a million rows. A security
+test reconciles them, and when they disagree the ledger wins — a ledger is
+what you can show a customer disputing a bill.
+
+Append-only, integer micro-dollars, and sign discipline enforced by the
+database: a `debit` of +500 would silently *add* credit and reconcile perfectly
+against a wrong balance, which is exactly the class of bug that is obvious in
+review and invisible in production.
+
+Two things are stated rather than hidden:
+
+- **Concurrency.** A call's cost is unknown until it returns, so the pre-check
+  is a balance check and a burst can each pass it before any debits. The
+  overshoot is bounded by one call per concurrent request, the debit itself is
+  atomic, and the balance is allowed to go **negative** — clamping at zero
+  would conceal the overspend rather than record it.
+- **Unpriced calls.** When a model's pricing is not configured, nothing is
+  charged and the gap is recorded loudly. Charging a guess invents a figure
+  people budget against; charging zero silently would make that model free and
+  unlimited, which is the cheapest possible exploit. The usage page reports
+  "N calls could not be priced" beside the total, never folded into it.
+
+### Payment
+
+**No card processor is integrated, and nothing pretends otherwise.** Activating
+a paid plan without money moving would mean real credit, real provider calls
+and no revenue — the most damaging possible fake confirmation.
+
+The default gateway refuses and explains. With `BILLING_MANUAL_PAYMENTS=true`,
+an administrator can record that payment was arranged elsewhere: invoice
+billing and self-hosted deployments are how most likely customers would pay,
+and it is honest because a *person* asserts it, attributably, into the audit
+log. Downgrading to the free plan always works without a gateway — refusing a
+cancellation because no processor is configured would be a hostage-taking.
 
 ---
 

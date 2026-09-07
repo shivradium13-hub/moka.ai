@@ -253,31 +253,47 @@ Composite foreign keys throughout, for the reason established in 0010.
 
 ---
 
-## 10. Billing, entitlements, usage (§34, §35)
+## 10. Billing, entitlements, usage (§34, §35) — IMPLEMENTED (0012–0013)
 
-Deliberately three layers, so limits are never hard-coded in application code:
+Three layers, so no limit is ever written in application code:
 
 ```
 plans ──< plan_entitlements
               │
 organizations ─┴─< subscriptions ──< entitlement_overrides
                                           │
-                                     usage_records ──▶ enforcement
+                                     usage / counts ──▶ enforcement
 ```
 
-**`plans`** — `id`, `key`, `name`, `price_monthly numeric`, `currency`, `status`.
+**`plans`** and **`plan_entitlements`** are **GLOBAL**, like `roles` and `permissions`: one catalogue for the installation. Both are registered in `INTENTIONALLY_GLOBAL_TABLES` so the isolation suite reviews that decision rather than skipping it.
 
-**`plan_entitlements`** — `plan_id`, `feature_key`, `limit_value numeric NULL` (null = unlimited), `unit`. Feature keys cover AI credits, allowed models, agent count, chatbot count, knowledge storage, API calls, automations, sandbox access, MCP access, team seats.
+**The grant is the important part:**
 
-**`subscriptions`** — `id`, `organization_id`, `plan_id`, `status`, `current_period_start/end`, `cancel_at`, `external_ref NULL` (payment processor, Phase 9).
+```sql
+GRANT SELECT ON plans, plan_entitlements, entitlement_overrides TO moka_app;
+```
 
-**`entitlement_overrides`** — per-organization exceptions without cloning a plan.
+The application reads the catalogue it is checked against and cannot write it. A bug able to `UPDATE plan_entitlements` would not be a limit bypass in one place — it would be every limit at once, silently, with the enforcement code still passing its own tests. Six tests in security suite 11 assert this from the runtime role.
 
-**`credits`** — `id`, `organization_id`, `balance numeric(18,6)`, `granted`, `consumed`, `reset_at`. Append-only ledger entries in `credit_transactions`.
+**`plan_entitlements`** — `plan_id`, `feature_key`, `limit_value bigint NULL`, `allowed_values text[]`, `unit`. `limit_value` has three states: a number, `NULL` for **unlimited**, and an absent row for **not included**. `limit ?? 0` breaks every unlimited customer; `limit ?? Infinity` gives the product away when a plan is unseeded. The application models all three explicitly.
 
-**`usage_records`** — `id`, `organization_id`, `project_id NULL`, `user_id NULL`, `kind` (`chat`|`agent_run`|`tool_call`|`embedding`|`research`|`storage`|`sandbox`|`api`), `provider_id NULL`, `model_id NULL`, `quantity numeric`, `unit`, `input_tokens`, `output_tokens`, `cost_usd numeric(18,6)`, `latency_ms`, `request_id`, `created_at`.
+**`subscriptions`** — one row per organization, enforced by a unique index. Two would make "which plan am I on?" a question with two answers, and enforcement would pick arbitrarily. `plan_id` is `ON DELETE RESTRICT`: deleting a plan organizations are on should fail loudly rather than silently unsubscribing them. `external_ref` is null for every subscription this build creates, because no processor is integrated.
 
-High write volume. Indexed on `(organization_id, created_at DESC)` and `(organization_id, kind, created_at DESC)`. **Range-partition by month** from the start — retrofitting partitioning onto a large table is painful.
+**`entitlement_overrides`** — a negotiated exception without cloning a plan per customer, which produces a plan table nobody can reason about. `reason` is `NOT NULL` and non-empty: an unexplained override is indistinguishable from a mistake six months later, and this is where "why does this customer have 10× the limit?" must be answerable.
+
+**`credits`** — the **cache**. `balance_micro_usd` is a copy of the ledger's sum, because a pre-flight check on every provider call cannot sum a million rows. Deliberately **not** constrained non-negative: cost is unknown until a call returns, so concurrent calls can each pass the pre-check before any debits, and clamping at zero would hide that overspend rather than record it.
+
+**`credit_transactions`** — the authoritative ledger. Append-only (`SELECT`, `INSERT`; no `UPDATE`, no `DELETE`). Integer micro-dollars, never floats.
+
+Three constraints carry real weight:
+
+- **`credit_transactions_sign_matches_kind`** — a `debit` of +500 would silently add credit *and reconcile perfectly against a wrong balance*. Obvious in review, invisible in production, so it is a constraint rather than a convention.
+- **`credit_transactions_adjustment_explained`** — an adjustment is a human overriding the ledger and must say why.
+- **`credit_transactions_unpriced_is_zero`** — a call we could not price is recorded as a zero-amount debit flagged `unpriced`. `0013` relaxed the sign rule in exactly one direction to admit it: a debit may be zero **if and only if** it is unpriced. Charging a guess invents a figure people budget against; recording nothing makes the unpriced model free and unlimited.
+
+**`usage_records`** (from 0004) is unchanged and already carries `cost_micro_usd bigint NULL`, where NULL means *pricing unknown*, not free. The usage page reports the known-cost total and the unpriced count **separately** — `COALESCE(cost, 0)` would produce one confident figure that silently understates the bill.
+
+**Still not partitioned.** `docs/architecture.md` called for range-partitioning `usage_records` by month from the start, and it is not done. That is a Phase 10 performance item, recorded here rather than quietly dropped.
 
 ---
 
@@ -324,6 +340,7 @@ Against the §36 list, with deviations noted:
 - **`knowledge_embeddings` + `embedding_models`** — avoids hard-coding one embedding model into the schema (§6).
 - **`agent_executions`** — `tool_executions` needs a parent run to attach to; without it there is nowhere to record budgets, step counts or run status.
 - **`plan_entitlements` / `entitlement_overrides`** — §34 explicitly requires `Plan → Entitlement → Usage → Enforcement` and forbids hard-coded limits. A flat `entitlements` table cannot express both plan defaults and per-organization exceptions.
+- **`credit_transactions`** — the §36 list has `credits` (a balance) but no ledger. A balance with no ledger is a number nobody can explain to a customer disputing it, so the balance became a cache and the ledger became the record.
 - **`chatbot_sources`** — the publication boundary between a chatbot and the knowledge it may quote. §36 assumed one implicit scope; making it an explicit join is what lets an organization decide, per chatbot, which internal documents become readable by the public.
 - **`chat_conversations` / `chat_messages`** — the §36 list has `conversations` and `messages` for STAFF chat. A visitor conversation is a different thing with a different principal, a different retention policy and a different token, and merging them would put an anonymous stranger's transcript in the same table as a member's.
 - **`research_runs` / `research_sources`** — §36 has no table for web research, and the citation ledger cannot live in `agent_executions`: a research run happens with or without an agent, and the evidence has to outlive the conversation that prompted it to be auditable at all.

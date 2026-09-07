@@ -7,6 +7,7 @@ export * from './credentials.js';
 export * from './agents.js';
 export * from './chat.js';
 export * from './research.js';
+export * from './billing.js';
 
 /**
  * Tables under Row-Level Security.
@@ -39,6 +40,10 @@ export const RLS_PROTECTED_TABLES: readonly string[] = [
   'chat_messages',
   'research_runs',
   'research_sources',
+  'subscriptions',
+  'entitlement_overrides',
+  'credits',
+  'credit_transactions',
 ];
 
 /**
@@ -52,4 +57,8 @@ export const INTENTIONALLY_GLOBAL_TABLES: Readonly<Record<string, string>> = {
   permissions: 'System permission registry, seeded from code.',
   role_permissions: 'System role/permission mapping, seeded from code.',
   __drizzle_migrations: 'Migration bookkeeping.',
+  plans: 'The plan catalogue is one list for the installation, like roles.',
+  plan_entitlements:
+    'What each plan includes. Global for the same reason, and READ ONLY to the ' +
+    'application so the code cannot raise the limits it is checked against.',
 };

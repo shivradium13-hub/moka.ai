@@ -232,6 +232,43 @@ export class RateLimitedError extends AppError {
   }
 }
 
+/**
+ * A plan limit was reached (§34).
+ *
+ * 402 rather than 403, and the distinction is worth keeping: 403 means "you
+ * may not do this", 402 means "you may, once you pay". A client that treats
+ * them the same shows the wrong prompt — "contact your administrator" instead
+ * of "upgrade" — and a user who cannot tell which they hit files the wrong
+ * support ticket.
+ *
+ * `details` carries the limit and current usage so a UI can render a real
+ * upgrade prompt rather than a generic wall.
+ */
+export class QuotaExceededError extends AppError {
+  constructor(params: {
+    feature: string;
+    publicMessage: string;
+    limit: number | null;
+    current: number;
+    internalMessage?: string;
+  }) {
+    super({
+      code: ErrorCode.QUOTA_EXCEEDED,
+      httpStatus: 402,
+      publicMessage: params.publicMessage,
+      details: {
+        feature: params.feature,
+        // -1 rather than omitting the key: a client can then distinguish
+        // "unlimited" from "we did not tell you", which JSON's missing-key
+        // ambiguity would otherwise collapse.
+        limit: params.limit ?? -1,
+        current: params.current,
+      },
+      ...(params.internalMessage ? { internalMessage: params.internalMessage } : {}),
+    });
+  }
+}
+
 export class ConfigurationError extends AppError {
   constructor(internalMessage: string) {
     super({

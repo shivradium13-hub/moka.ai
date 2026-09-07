@@ -91,7 +91,7 @@ This is why several choices above differ from the obvious default.
 | **Brave / Serper / Tavily / Exa** search APIs | **Paid**, and avoidable — so not bundled (§2). Scraping Google or Bing instead is ruled out flatly: their terms prohibit it, and the brief forbids bypassing a provider's terms. | **SearXNG** (AGPL, run as a service by the operator, never linked into our code) when configured; **explicit URLs** otherwise, which is the correct tool for "read these pages" rather than a degraded mode. |
 
 ### DEFERRED PAID DECISIONS (not needed until Phase 9/10)
-- **Payment processor** (Stripe or equivalent). Real money movement cannot be self-hosted. It is a per-transaction fee, not a SaaS subscription. The *entitlement and credit ledger is entirely ours*; the processor is a thin adapter behind a `PaymentGateway` interface. Nothing in Phases 1–8 depends on it.
+- **Payment processor** (Stripe or equivalent). Real money movement cannot be self-hosted. It is a per-transaction fee, not a SaaS subscription. The *entitlement and credit ledger is entirely ours* and was built in Phase 9; the processor remains a thin adapter behind a `PaymentGateway` interface, and **no implementation of it exists**. The default gateway refuses and says so; a `ManualPaymentGateway` lets an administrator record a payment arranged elsewhere, attributably. §45 forbids faking the confirmation, and activating a paid plan without money moving would be the most damaging possible instance of that.
 - **Transactional email.** Self-hosted SMTP has severe deliverability problems. Abstracted behind a `Mailer` interface; the decision is deferred.
 
 ---
@@ -146,7 +146,7 @@ Browser ─▶ apps/web ─▶ apps/api ─▶ AI Gateway ─▶ Model Router �
 **Gateway request pipeline**
 
 1. Authenticate, then derive `TenantContext` (org, user, scopes). Never from the request body.
-2. Check entitlements and credit balance (§34/§35). Reject early if exhausted.
+2. Check entitlements and credit balance (§34/§35). Reject early if exhausted. **Implemented in Phase 9, and the ordering is load-bearing**: an explicitly requested model is checked against the plan's allowlist BEFORE routing, because routing resolves credentials and would otherwise answer "no credential is configured for anthropic" to a caller whose plan simply excludes that model — the wrong answer, and a leak of which providers this deployment has.
 3. Resolve the credential — Moka-managed or BYOK. Decrypt **in memory only**; never logged, never placed in prompts, never surfaced in errors.
 4. `ModelRouter.select(capabilities, policy)` returns `{provider, model, fallbacks[]}`.
 5. The adapter streams, producing a **normalized event union**.

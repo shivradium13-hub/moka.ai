@@ -16,8 +16,11 @@ import {
 } from '@moka/ai';
 import { EMPTY_USAGE } from '@moka/ai';
 import type { TenantContext } from '@moka/core';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
 import { CredentialsService } from './credentials.service.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
+import { CreditsService } from '../billing/credits.service.js';
 import { getLogger } from '../../common/logger.js';
 
 /**
@@ -51,6 +54,8 @@ export class GatewayService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly credentials: CredentialsService,
+    private readonly entitlements: EntitlementsService,
+    private readonly credits: CreditsService,
   ) {}
 
   private async adapterFor(
@@ -92,6 +97,31 @@ export class GatewayService {
     request: ChatRequest,
     meta: { projectId?: string | null; requestId?: string | undefined },
   ): Promise<GatewayResult> {
+    /*
+     * Entitlements are checked BEFORE the credential is resolved and before
+     * any provider is contacted (architecture §4, step 2). Refusing early
+     * means an exhausted organization never decrypts a key, never opens a
+     * connection, and never spends a millisecond of somebody else's quota.
+     */
+    await this.credits.requireCredit(context);
+
+    /*
+     * An EXPLICITLY REQUESTED model is checked before routing.
+     *
+     * `planRoute` resolves credentials as part of choosing a model, and it
+     * throws NO_CREDENTIAL for a model whose provider is unconfigured. If the
+     * entitlement check ran only inside the fallback loop below, a caller
+     * asking for a model their plan excludes would be told "no credential is
+     * configured for anthropic" — which is both the wrong answer and a small
+     * leak of which providers this deployment has.
+     *
+     * Architecture §4 puts entitlements at step 2 and credentials at step 3,
+     * and this is why that order is not arbitrary.
+     */
+    if (request.model) {
+      await this.entitlements.requireAllowed(context, Feature.AI_MODELS, request.model);
+    }
+
     const plan = planRoute(request, {
       availableProviders: await this.credentials.availableProviders(context),
     });
@@ -102,11 +132,23 @@ export class GatewayService {
 
     for (const model of candidates) {
       try {
+        /*
+         * And again per candidate, because the router may FALL BACK to a model
+         * the plan does not include. Checking only the requested one would
+         * make the fallback path a way around the allowlist, reachable by
+         * anyone who can make the first provider fail.
+         *
+         * Refusing here lets the loop continue to the next candidate, which is
+         * the right behaviour: an unavailable model and an unlicensed one are
+         * both "try the next one".
+         */
+        await this.entitlements.requireAllowed(context, Feature.AI_MODELS, model.id);
+
         const adapter = await this.adapterFor(context, model);
         const response = await adapter.chat(request, model.id);
         const cost = estimateCostByModelId(model.id, response.usage);
 
-        await this.record(context, {
+        const usageRecordId = await this.record(context, {
           model,
           operation: 'chat',
           usage: response.usage,
@@ -116,6 +158,24 @@ export class GatewayService {
           errorCode: null,
           projectId: meta.projectId ?? null,
           requestId: meta.requestId,
+        });
+
+        /*
+         * Debited AFTER the call, because the cost is not known until the
+         * model has chosen how many tokens to emit. `charge` never throws: the
+         * user got their answer, and a failure to record the debit is our
+         * problem to reconcile rather than theirs to see as a 500.
+         *
+         * `cost.microUsd` is null when the model's pricing is not configured.
+         * That is recorded as an unpriced call rather than charged as zero —
+         * see planDebit in @moka/billing for why silently free is the worst of
+         * the available options.
+         */
+        await this.credits.charge(context, {
+          costMicroUsd: cost.microUsd,
+          usageRecordId,
+          requestId: meta.requestId,
+          reason: `chat via ${model.id}`,
         });
 
         return {
@@ -267,10 +327,15 @@ export class GatewayService {
       projectId: string | null;
       requestId: string | undefined;
     },
-  ): Promise<void> {
+    /*
+     * Returns the row id so a credit debit can point at the usage it paid for.
+     * Null when the write failed — a lost usage row must not take a working
+     * provider call down with it, and the debit simply records no link.
+     */
+  ): Promise<string | null> {
     try {
-      await this.db.withTenant(context, async (tx) => {
-        await tx.insert(usageRecords).values({
+      return await this.db.withTenant(context, async (tx) => {
+        const [row] = await tx.insert(usageRecords).values({
           organizationId: context.organizationId,
           projectId: entry.projectId,
           userId: context.userId,
@@ -286,7 +351,8 @@ export class GatewayService {
           finishReason: entry.finishReason,
           errorCode: entry.errorCode,
           requestId: entry.requestId ?? null,
-        });
+        }).returning({ id: usageRecords.id });
+        return row?.id ?? null;
       });
     } catch (error) {
       getLogger().error(
@@ -298,6 +364,7 @@ export class GatewayService {
         },
         'failed to write usage record',
       );
+      return null;
     }
   }
 }

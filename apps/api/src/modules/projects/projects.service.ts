@@ -3,7 +3,9 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { Database, projects } from '@moka/db';
 import { ConflictError, NotFoundError, type TenantContext } from '@moka/core';
 import { assertBelongsToTenant } from '@moka/tenancy';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
 import { AuditService } from '../../common/audit.service.js';
 
 export interface ProjectDto {
@@ -30,6 +32,7 @@ export class ProjectsService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   async list(context: TenantContext): Promise<ProjectDto[]> {
@@ -85,6 +88,8 @@ export class ProjectsService {
     input: { name: string; slug: string; description?: string | null },
     meta: { requestId?: string | undefined },
   ): Promise<ProjectDto> {
+    await this.entitlements.requireQuota(context, Feature.PROJECTS_MAX);
+
     const created = await this.db.withTenant(context, async (tx) => {
       const clash = await tx
         .select({ id: projects.id })

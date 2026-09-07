@@ -18,6 +18,7 @@ const NAV = [
   { href: '/chatbots', label: 'Chatbots' },
   { href: '/inbox', label: 'Inbox' },
   { href: '/credentials', label: 'Credentials' },
+  { href: '/usage', label: 'Usage' },
   { href: '/members', label: 'Members' },
   { href: '/settings', label: 'Settings' },
 ];

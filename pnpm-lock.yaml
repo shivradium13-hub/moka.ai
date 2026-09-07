@@ -115,6 +115,9 @@ importers:
       '@moka/agents':
         specifier: workspace:*
         version: link:packages/agents
+      '@moka/billing':
+        specifier: workspace:*
+        version: link:packages/billing
       '@moka/chat':
         specifier: workspace:*
         version: link:packages/chat
@@ -184,6 +187,9 @@ importers:
       '@moka/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@moka/billing':
+        specifier: workspace:*
+        version: link:../../packages/billing
       '@moka/chat':
         specifier: workspace:*
         version: link:../../packages/chat
@@ -339,6 +345,22 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)(supports-color@7.2.0)
 
+  packages/billing:
+    dependencies:
+      '@moka/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.28)(supports-color@7.2.0)(tsx@4.23.13)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)(supports-color@7.2.0)
+
   packages/chat:
     dependencies:
       '@moka/core':
@@ -414,6 +436,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@moka/billing':
+        specifier: workspace:*
+        version: link:../billing
       '@moka/core':
         specifier: workspace:*
         version: link:../core

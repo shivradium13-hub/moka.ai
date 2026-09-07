@@ -25,8 +25,10 @@ import {
   type StorageDriver,
 } from '@moka/knowledge';
 import { loadConfig } from '@moka/config';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
 import { AuditService } from '../../common/audit.service.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
 import { getLogger } from '../../common/logger.js';
 
 export interface IngestResult {
@@ -62,6 +64,7 @@ export class IngestionService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {
     const config = loadConfig();
     // TODO(Phase 2b): select an S3-compatible driver when STORAGE_DRIVER='s3'.
@@ -83,6 +86,18 @@ export class IngestionService {
     },
   ): Promise<IngestResult> {
     const source = await this.requireSource(context, params.sourceId);
+
+    /*
+     * Storage is a SIZE limit, so the check asks for the bytes about to be
+     * added rather than for "one more". A plan measured in gigabytes that
+     * refused only on document count would be no limit at all.
+     */
+    await this.entitlements.requireQuota(
+      context,
+      Feature.KNOWLEDGE_STORAGE_BYTES,
+      params.bytes.byteLength,
+    );
+
     const checksum = sha256(params.bytes);
 
     // Idempotency: identical bytes in the same source are not re-ingested.

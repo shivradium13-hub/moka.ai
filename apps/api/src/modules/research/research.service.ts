@@ -15,8 +15,10 @@ import {
   type ResearchResult,
   type SearchProvider,
 } from '@moka/research';
+import { Feature } from '@moka/billing';
 import { DATABASE } from '../../database/database.module.js';
 import { AuditService } from '../../common/audit.service.js';
+import { EntitlementsService } from '../billing/entitlements.service.js';
 import { GatewayService } from '../ai/gateway.service.js';
 import { RobotsService } from './robots.service.js';
 import { PageFetcherService } from './page-fetcher.service.js';
@@ -59,6 +61,7 @@ export class ResearchService {
     private readonly fetcher: PageFetcherService,
     private readonly gateway: GatewayService,
     private readonly audit: AuditService,
+    private readonly entitlements: EntitlementsService,
   ) {}
 
   /** What the UI is told about search, so it never implies a capability. */
@@ -98,6 +101,13 @@ export class ResearchService {
       requestId?: string | undefined;
     },
   ): Promise<ResearchResult & { runId: string }> {
+    /*
+     * The monthly run limit, checked BEFORE any outbound request. A research
+     * run costs a provider call and several requests to whoever is being
+     * researched; refusing after the fetching would waste both.
+     */
+    await this.entitlements.requireQuota(context, Feature.RESEARCH_RUNS_PER_MONTH);
+
     const provider = this.providerFor(input.urls);
     const runId = await this.startRun(context, input, provider.id);
 

@@ -334,6 +334,105 @@ User-facing detail is deliberately coarse in both cases. A caller who can tell "
 
 ---
 
+## 5b. Entitlements and billing integrity (§34, §35)
+
+**Implemented in Phase 9.** Security suite 11 (`tests/security/entitlement-enforcement.test.ts`).
+
+### The escalation an entitlement system has to rule out
+
+The thing being limited must not be able to raise its own limit. That is a **grant**, not a convention:
+
+```sql
+GRANT SELECT ON plans, plan_entitlements, entitlement_overrides TO moka_app;
+```
+
+The application can read the catalogue it is checked against and cannot write it. A bug — or a compromised request path — able to `UPDATE plan_entitlements` would not be a limit bypass in one place; it would be every limit at once, silently, with the enforcement code still passing its own tests.
+
+Plans are edited by an operator through migration or the seed. Overrides are granted the same way, deliberately: there is no self-service path to raising your own limit, and the absence of an endpoint is backed by the absence of a privilege.
+
+### Three layers, no code constant
+
+```
+entitlement_overrides   per-organization exception
+         ↓ falls back to
+plan_entitlements       what the plan includes
+         ↓ falls back to
+DENY                    an unlisted feature is not included
+```
+
+There is deliberately **no third fallback to a code constant**. Such a constant would be the hard-coded limit the design exists to remove, and it would take over silently the moment a plan was unseeded.
+
+A limit has three states and conflating any two is a real bug:
+
+| Value | Meaning | The mistake |
+|---|---|---|
+| a number | that many | — |
+| `null` | **unlimited** | `limit ?? 0` breaks every customer on an unlimited plan |
+| no row | **not included** | `limit ?? Infinity` gives the product away when a plan is unseeded |
+
+`Entitlement` is a discriminated union over all three, so neither collapse is expressible.
+
+### Entitlements are not safety ceilings
+
+The gate "no hard-coded limits" is easiest to misread into breaking this distinction:
+
+| | Examples | Where they live |
+|---|---|---|
+| **Entitlements** | agents, chatbots, AI credit, seats, storage | Database rows. An operator changes them freely; selling more is the business model. |
+| **Safety ceilings** | the public chatbot's 4-step budget, crawler page and depth maxima, SSRF blocked ranges, upload size cap | **Constants, and they stay constants.** |
+
+Making a safety ceiling purchasable would mean selling a weaker security posture to whoever pays most — the enterprise tier would be the one whose public chatbot can be driven into an unbounded loop by a stranger. `SAFETY_CEILINGS_ARE_NOT_ENTITLEMENTS` in `@moka/billing` lists them by name, and two tests assert none has become a feature key or a seeded row.
+
+### Counting happens at the moment of the check
+
+`currentUsage` runs a real `SELECT count(*)` on every check rather than reading a cached figure. With a cache, a customer at their limit can create one more of everything on every instance holding a stale count. It costs one query per creation; creations are rare and this is not on the per-token path.
+
+### The credit ledger
+
+`credit_transactions` is authoritative. `credits.balance_micro_usd` is a **cache** of its sum, because a pre-flight check on every provider call cannot sum a million rows. Suite 11 reconciles the two; when they disagree the ledger wins, because a ledger is what you can show a customer who disputes a bill.
+
+- **Append-only**: `SELECT` and `INSERT`, no `UPDATE`, no `DELETE`.
+- **Sign discipline is a database constraint**, not a convention. A `debit` of +500 would silently *add* credit and would reconcile perfectly against a wrong balance — obvious in review, invisible in production.
+- **An adjustment must carry a reason.** An unexplained one is indistinguishable from a mistake six months later.
+
+Integer micro-dollars throughout, never floats: drift is invisible per request and material across millions of them.
+
+### Concurrency, stated honestly
+
+The cost of a provider call is not known until it returns, so the pre-flight check is a **balance** check, not a price check. A burst of concurrent requests can each pass it before any debits.
+
+The bound is one call's cost per concurrent request, and the consequences are handled rather than hidden:
+
+- the debit is a single atomic `UPDATE`, so no two debits lose each other;
+- the balance may go **negative**, because clamping at zero would conceal exactly this overspend;
+- the next pre-check refuses at or below zero, so the overshoot is bounded by one burst.
+
+Reserving a pessimistic maximum before every call would make usable credit a fraction of what a customer bought, and would still be wrong whenever the reservation and the actual cost diverged.
+
+### Unpriced calls are not free calls
+
+`estimateCost` returns `null` when a model's pricing is not configured, and refuses to invent a figure. Billing has to decide what that means, and the options are narrow:
+
+| Option | Consequence |
+|---|---|
+| Charge a guess | Invents a figure people budget against. |
+| Charge zero, silently | The unpriced model becomes free and unlimited — the cheapest possible exploit: use whichever model nobody has priced. |
+| Refuse the call | Correct, and blocks a working model over a missing row in *our* registry. |
+
+So: charge nothing, and **record the gap loudly**. A zero-amount debit flagged `unpriced` is written, the balance pre-check still requires positive credit, and both the usage page and the plan panel report "N calls this period could not be priced". The gap surfaces as the registry bug it is, rather than being absorbed as revenue or given away as a feature.
+
+### Payment
+
+**No card processor is integrated, and nothing pretends otherwise.** §45 forbids a fake payment confirmation, and the most damaging instance of that would be activating a paid plan without money having moved: real credit, real provider calls, no revenue.
+
+`UnavailablePaymentGateway` is the default and refuses with an explanation. `ManualPaymentGateway` (`BILLING_MANUAL_PAYMENTS=true`) lets an administrator record that payment was arranged elsewhere — invoice billing and self-hosted deployments are how most of this product's likely customers would pay, and it is honest because a *person* asserts the payment, attributably, into the audit log.
+
+A downgrade to the free plan is always permitted without a gateway. Refusing a cancellation because no processor is configured would be a hostage-taking, not a safeguard.
+
+When a real adapter is written, three things must hold: activation comes from a verified **webhook**, never a browser redirect; the signature is checked before the body is parsed and the event id recorded against replay; and card data never reaches this server.
+
+---
+
 ## 6. Sandbox (§27, §28)
 
 Requirements for the coding agent's execution environment: CPU limit, memory limit, wall-clock timeout, filesystem isolation, network restriction (default deny), process count limit, ephemeral workspace, automatic cleanup, and **no access to production secrets, the application database, or the credential vault**.
@@ -394,9 +493,12 @@ These live in `tests/security/` and run against real PostgreSQL and Valkey in CI
 | 7 | Arbitrary command execution | No path reaches host command execution; sandbox escape attempts fail |
 | 8 | Customer boundary | A chatbot visitor holds no role; reaches exactly one conversation in one organization; reads only explicitly published knowledge; and the widget ships no secret |
 | 9 | File access isolation | Uploaded files are reachable only within the owning organization; path traversal fails |
+| 11 | Entitlement enforcement | Limits resolve from data with no code fallback; the application cannot edit the catalogue it is checked against; the credit ledger is append-only, sign-checked and reconciles against the cached balance |
 | 10 | Knowledge isolation | Retrieval, citation and re-index paths never surface another organization's chunks |
 
-Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6. Suite 6 gates Phase 7, alongside the citation-integrity gate in §4.6.
+Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6. Suite 6 gates Phase 7, alongside the citation-integrity gate in §4.6. Suite 11 gates Phase 9.
+
+Suite 11 is numbered beyond the §39 list of ten because it tests a property the list did not anticipate: that the code cannot raise the limits it is checked against. That is an authorization question, not a billing one, and it belongs with the security suites rather than in a feature test.
 
 Suite 8 was originally scoped as "API authorization" (scopes, revocation, cross-organization key rejection). Those assertions did not disappear: the public deployment key IS the externally-presented key of this phase, and revocation, cross-organization rejection and rate limiting are all asserted against it. Programmatic API keys for staff integrations arrive with Phase 9.
 
