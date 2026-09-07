@@ -127,6 +127,12 @@ importers:
       '@moka/db':
         specifier: workspace:*
         version: link:packages/db
+      '@moka/net':
+        specifier: workspace:*
+        version: link:packages/net
+      '@moka/research':
+        specifier: workspace:*
+        version: link:packages/research
       '@types/node':
         specifier: ^22.10.2
         version: 22.20.1
@@ -199,6 +205,9 @@ importers:
       '@moka/net':
         specifier: workspace:*
         version: link:../../packages/net
+      '@moka/research':
+        specifier: workspace:*
+        version: link:../../packages/research
       '@moka/tenancy':
         specifier: workspace:*
         version: link:../../packages/tenancy
@@ -482,6 +491,31 @@ importers:
       undici:
         specifier: ^7.2.0
         version: 7.29.1
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.28)(supports-color@7.2.0)(tsx@4.23.13)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.1)(lightningcss@1.32.0)(supports-color@7.2.0)
+
+  packages/research:
+    dependencies:
+      '@moka/core':
+        specifier: workspace:*
+        version: link:../core
+      '@moka/knowledge':
+        specifier: workspace:*
+        version: link:../knowledge
+      '@moka/net':
+        specifier: workspace:*
+        version: link:../net
+      cheerio:
+        specifier: ^1.0.0
+        version: 1.2.0
     devDependencies:
       tsup:
         specifier: ^8.3.5

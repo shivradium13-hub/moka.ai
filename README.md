@@ -103,8 +103,9 @@ packages/
   knowledge/ Parsers, chunking, retrieval, storage driver.
   agents/    Tool contracts, authorization, prompt isolation, runtime.
   chat/      Customer-chatbot logic: origins, keys, grounding, the widget.
+  research/  Citation ledger, crawl policy, search providers, Path C pipeline.
   ai/        Provider adapters, model registry, router, cost accounting.
-  net/       safeFetch — the single SSRF-guarded egress point.
+  net/       safeFetch and robots.txt — the guarded egress point.
   config/    Zod-validated environment loader.
   crypto/    Envelope encryption, Argon2id, token hashing.
   db/        Drizzle schema, SQL migrations, RLS policies, seeds.
@@ -169,6 +170,84 @@ document and does exactly what it says. Nothing is deleted, because
 authorisation depends on the caller's role and the agent's allowlist, neither
 of which is reachable from any prompt. Consequential actions then pause for a
 human, and that approval authorises exactly one execution.
+
+---
+
+## Research and crawling
+
+**A source is a document we fetched.** Not a URL a model produced, not a title
+it remembered, not a snippet a search engine returned.
+
+Ask a model to research something and cite its sources and it will produce a
+bibliography: plausible titles, plausible authors, URLs that resolve to nothing.
+It is not lying, it is completing a pattern — and a fabricated citation is worse
+than none, because it turns an unsupported claim into an apparently sourced one,
+which is the form people stop checking.
+
+So the model is never given the chance. **It does not write URLs. It writes
+`[3]`.** Every link a reader sees comes from a ledger of pages actually
+retrieved, recording the final URL after redirects, the time, and a hash of what
+came back. A citation is a lookup, not a generation.
+
+Afterwards, the answer is checked against that ledger. A `[n]` naming no real
+source is removed; a URL appearing in none of the fetched pages is removed; a
+quotation absent from the source it cites is flagged. All three are reported to
+the user rather than quietly cleaned up — someone deciding how much to trust a
+paragraph is better served by knowing the model invented two references in it
+than by a tidier page.
+
+And when nothing could be fetched, **the model is not called at all**. Handing
+it a question, an instruction to cite everything, and nothing to cite is the
+most reliable way to get an invented bibliography. Refusing costs one provider
+call and saves a fabrication.
+
+Six months later the run is still auditable: `research_sources` keeps the
+excerpt each source contributed, so anyone can see exactly what was in front of
+the model when it wrote a sentence.
+
+### Searching the web
+
+There is deliberately **no bundled search provider**. The good ones are paid,
+and scraping the free ones violates their terms. So:
+
+- **Explicit URLs** always work and need nothing configured. For the most
+  common real request — "read these three pages and tell me what they say" —
+  this is not a fallback, it is the right tool.
+- **SearXNG**, self-hosted and open source, enables keyword search. Set
+  `SEARXNG_URL`.
+
+The UI says which mode it is in. A research feature that appears to search the
+web and does not is exactly the quiet failure this design exists to avoid.
+
+### robots.txt is an egress control, not a courtesy
+
+A site's robots.txt is the machine-readable form of its terms for automated
+clients, and fetching a path a publisher has said in writing not to fetch is
+not something a rate limiter makes acceptable. So it lives next to the SSRF
+guard: those rules decide which *addresses* we may dial, these decide which
+*paths* we are permitted to.
+
+The failure policy is the part that matters. A missing robots.txt permits. A
+**403 or a 500 denies** — a server that will not show us its rules has not
+invited us to guess them, and crawling blind because we could not read them is
+the cautious reading in reverse.
+
+The crawler also honours `noindex` by reading a page and not storing it, and
+identifies itself honestly (`MokaAI-Crawler/1.0`) so a site owner can block us
+specifically. Impersonating a browser would be a small deception with no upside.
+
+### Agent templates
+
+A template is a name, instructions, a risk ceiling and a tool allowlist —
+nothing more. It creates an ordinary agent, and one built from an official
+template passes through exactly the same authorisation gates as one typed in by
+hand. Being official grants nothing.
+
+Every template states what it **cannot** do, and that list is never empty: the
+sales assistant says plainly that it is not connected to a CRM, the social
+drafter that it cannot publish anything. A picker that lists six capabilities
+and no limits sells a product that does not exist, and the user finds out from
+a wrong answer instead of from us.
 
 ---
 

@@ -84,6 +84,28 @@ export const envSchema = z.object({
 
   STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
   STORAGE_LOCAL_PATH: z.string().default('./local/storage'),
+
+  /*
+   * Web search for the research pipeline — OPTIONAL and FREE.
+   *
+   * A SearXNG instance the operator runs themselves. There is deliberately no
+   * bundled search provider: the good ones are paid, and scraping the free
+   * ones violates their terms (master prompt §2). Unset, research still works
+   * against URLs a user supplies, and the UI says so rather than pretending a
+   * keyword search happened.
+   *
+   * It may point at a private address — a self-hosted instance usually does —
+   * and that exception is derived from THIS value alone. See
+   * `configuredInternalHosts` in @moka/net for why a config-supplied private
+   * host is categorically different from a request-supplied one.
+   */
+  SEARXNG_URL: z
+    .string()
+    .url()
+    .refine((v) => v.startsWith('http://') || v.startsWith('https://'), {
+      message: 'must be an http:// or https:// URL',
+    })
+    .optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

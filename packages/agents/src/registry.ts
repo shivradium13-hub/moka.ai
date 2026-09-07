@@ -44,6 +44,15 @@ export interface ToolBackend {
   listKnowledgeSources(
     context: ToolCallContext,
   ): Promise<Array<{ id: string; name: string; type: string; documentCount: number }>>;
+  webResearch(
+    context: ToolCallContext,
+    input: { question: string; urls: readonly string[] },
+  ): Promise<{
+    status: string;
+    answer: string;
+    citations: Array<{ id: number; url: string; title: string | null }>;
+    skipped: Array<{ url: string; reason: string }>;
+  }>;
 }
 
 /**
@@ -163,6 +172,48 @@ export function buildRegistry(backend: ToolBackend): Map<string, ToolDefinition>
       execute: async (_input, context) => ({
         sources: await backend.listKnowledgeSources(staffContext(context)),
       }),
+    }),
+
+    defineTool({
+      /*
+       * Web research (Phase 7, architecture §5 Path C).
+       *
+       * READ risk — it changes nothing — but it carries its OWN permission
+       * rather than PROJECT_READ, because it is not a read of our data: every
+       * call spends provider tokens and sends requests from our address range
+       * to whoever is being researched.
+       *
+       * Deliberately NOT customerSafe, and this is the tool where that matters
+       * most. A public chatbot able to call it would be an open SSRF and
+       * traffic-amplification proxy, driven by strangers, billed to the
+       * organization that published the bot. The flag defaults to false, so
+       * this is a comment about a decision rather than an override.
+       */
+      name: 'web_research',
+      description:
+        'Research a question using web pages. Returns an answer with numbered citations to ' +
+        'pages that were actually fetched. Supply urls to read specific pages; otherwise a ' +
+        'configured search engine is used. Every source in the result was retrieved — none ' +
+        'is generated.',
+      inputSchema: z.object({
+        question: z.string().min(3).max(500),
+        urls: z.array(z.string().url()).max(10).default([]),
+      }),
+      outputSchema: z.object({
+        status: z.string(),
+        answer: z.string(),
+        citations: z.array(
+          z.object({ id: z.number(), url: z.string(), title: z.string().nullable() }),
+        ),
+        skipped: z.array(z.object({ url: z.string(), reason: z.string() })),
+      }),
+      permission: Permission.RESEARCH_RUN,
+      risk: RiskLevel.READ,
+      execute: async (input, context) =>
+        backend.webResearch(staffContext(context), {
+          question: input.question,
+          urls: input.urls,
+        }),
     }),
 
     defineTool({

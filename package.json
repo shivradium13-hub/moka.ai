@@ -27,6 +27,8 @@
     "@moka/core": "workspace:*",
     "@moka/crypto": "workspace:*",
     "@moka/db": "workspace:*",
+    "@moka/net": "workspace:*",
+    "@moka/research": "workspace:*",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "dotenv": "^16.4.7",

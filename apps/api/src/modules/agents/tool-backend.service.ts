@@ -5,6 +5,7 @@ import { ConflictError } from '@moka/core';
 import type { ToolBackend, ToolCallContext } from '@moka/agents';
 import { DATABASE } from '../../database/database.module.js';
 import { RetrievalService } from '../knowledge/retrieval.service.js';
+import { ResearchService } from '../research/research.service.js';
 
 /**
  * Concrete implementations of the agent tools (master prompt §19).
@@ -23,6 +24,7 @@ export class ToolBackendService implements ToolBackend {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly retrieval: RetrievalService,
+    private readonly research: ResearchService,
   ) {}
 
   async listProjects(context: ToolCallContext) {
@@ -140,6 +142,39 @@ export class ToolBackendService implements ToolBackend {
       section: chunk.section,
       page: chunk.page,
     }));
+  }
+
+  /**
+   * Web research, as a tool.
+   *
+   * The agent supplies a question and optionally some URLs. What comes back is
+   * an answer whose every citation is a page that was actually fetched — the
+   * verification happens inside the pipeline, before this returns, so an agent
+   * cannot receive a fabricated source to repeat.
+   *
+   * `skipped` is returned to the MODEL on purpose. An agent that knows three
+   * of five candidates were unreachable can say so; one that only sees two
+   * sources will present a thin answer as a complete one.
+   */
+  async webResearch(context: ToolCallContext, input: { question: string; urls: readonly string[] }) {
+    const result = await this.research.run(context.tenant, {
+      question: input.question,
+      urls: input.urls,
+      requestId: context.requestId,
+    });
+
+    return {
+      status: result.status,
+      answer: result.answer,
+      citations: result.citations.map((citation) => ({
+        id: citation.id,
+        url: citation.url,
+        title: citation.title,
+      })),
+      skipped: result.attempts
+        .filter((attempt) => attempt.outcome !== 'collected')
+        .map((attempt) => ({ url: attempt.url, reason: attempt.detail ?? attempt.outcome })),
+    };
   }
 
   async listKnowledgeSources(context: ToolCallContext) {

@@ -77,6 +77,26 @@ export interface SafeFetchOptions {
    * Throws if NODE_ENV is production.
    */
   testOnlyAllowPrivateHosts?: readonly string[];
+  /**
+   * Hosts an OPERATOR configured at boot that are permitted to resolve to
+   * private addresses — a self-hosted SearXNG on an internal network, say.
+   *
+   * THIS IS NOT THE TEST HATCH AND NOT A GENERAL ESCAPE. The distinction that
+   * makes it safe is the source of the value, not its shape:
+   *
+   *   A URL derived from a REQUEST — a crawl target, a page a model asked for,
+   *     a webhook — is attacker-influenceable and never gets this. That is the
+   *     entire SSRF threat, and nothing in this codebase passes such a value
+   *     here.
+   *   A URL from validated boot CONFIGURATION is chosen by the person running
+   *     the server, who could equally point DATABASE_URL at an internal host.
+   *     Refusing it would not add safety; it would push operators to disable
+   *     the guard wholesale, which is strictly worse.
+   *
+   * Still an allowlist of exact hostnames, so every other address stays
+   * blocked on the same request, and still subject to scheme and port rules.
+   */
+  configuredInternalHosts?: readonly string[];
 }
 
 const DEFAULTS = {
@@ -226,11 +246,15 @@ export async function safeFetch(
     options.signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
 
-  const dispatcher = guardedAgent(options.testOnlyAllowPrivateHosts);
+  const privateEscapes = [
+    ...(options.testOnlyAllowPrivateHosts ?? []),
+    ...(options.configuredInternalHosts ?? []),
+  ];
+  const dispatcher = guardedAgent(privateEscapes);
 
   try {
     assertTestHatchPermitted(options.testOnlyAllowPrivateHosts);
-    let current = validateUrl(rawUrl, options.allowedHosts, options.testOnlyAllowPrivateHosts);
+    let current = validateUrl(rawUrl, options.allowedHosts, privateEscapes);
     let method = options.method ?? 'GET';
     let body = options.body;
 
@@ -256,7 +280,7 @@ export async function safeFetch(
         current = validateUrl(
           new URL(location, current).toString(),
           options.allowedHosts,
-          options.testOnlyAllowPrivateHosts,
+          privateEscapes,
         );
 
         // 303, and 301/302 in practice, become GET with no body.
@@ -323,6 +347,8 @@ export interface AssertSafeUrlOptions {
   allowedHosts?: readonly string[];
   /** TEST ONLY. See SafeFetchOptions.testOnlyAllowPrivateHosts. */
   testOnlyAllowPrivateHosts?: readonly string[];
+  /** See SafeFetchOptions.configuredInternalHosts. */
+  configuredInternalHosts?: readonly string[];
 }
 
 /** Validate a URL without fetching it. Used to vet configured endpoints. */
@@ -337,5 +363,8 @@ export function assertSafeUrl(rawUrl: string, options: AssertSafeUrlOptions = {}
     throw new TypeError('assertSafeUrl expects an options object, not an array of hosts.');
   }
   assertTestHatchPermitted(options.testOnlyAllowPrivateHosts);
-  validateUrl(rawUrl, options.allowedHosts, options.testOnlyAllowPrivateHosts);
+  validateUrl(rawUrl, options.allowedHosts, [
+    ...(options.testOnlyAllowPrivateHosts ?? []),
+    ...(options.configuredInternalHosts ?? []),
+  ]);
 }

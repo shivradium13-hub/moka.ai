@@ -44,6 +44,7 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   [Permission.PROJECT_UPDATE]: 'Update projects',
   [Permission.PROJECT_DELETE]: 'Delete projects',
   [Permission.AUDIT_READ]: 'Read the audit log',
+  [Permission.RESEARCH_RUN]: 'Run web research tasks',
 };
 
 interface SeededOrg {

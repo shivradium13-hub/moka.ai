@@ -77,6 +77,8 @@ export class IngestionService {
       filename: string;
       mimeType: string;
       bytes: Uint8Array;
+      /** Origin URL, when the bytes came from the web. Null for an upload. */
+      url?: string | null;
       requestId?: string | undefined;
     },
   ): Promise<IngestResult> {
@@ -154,6 +156,7 @@ export class IngestionService {
           checksum,
           pageCount: parsed.pageCount,
           rawStorageKey: storageKey,
+          url: params.url ?? null,
           status: DocumentStatus.PROCESSING,
           metadata: { warnings: parsed.warnings, parser: parsed.metadata },
         })
@@ -229,6 +232,13 @@ export class IngestionService {
       sourceId: string;
       title: string;
       text: string;
+      /**
+       * Where the text came from, when it came from somewhere. Set by the
+       * website crawler so a retrieved chunk can be traced to the page it was
+       * read from — which is what makes a citation checkable rather than
+       * merely plausible.
+       */
+      url?: string | null;
       requestId?: string | undefined;
     },
   ): Promise<IngestResult> {
@@ -238,6 +248,7 @@ export class IngestionService {
       filename: `${params.title}.md`,
       mimeType: 'text/markdown',
       bytes,
+      url: params.url ?? null,
       requestId: params.requestId,
     });
   }

@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/commo
 import { z } from 'zod';
 import { Permission, ValidationError, type TenantContext } from '@moka/core';
 import { stripTenantKeys } from '@moka/tenancy';
-import { RiskLevel, toolCatalogue } from '@moka/agents';
+import { AGENT_TEMPLATES, RiskLevel, findTemplate, toolCatalogue } from '@moka/agents';
 import { AgentsService } from './agents.service.js';
 import { AgentRunnerService } from './agent-runner.service.js';
 import { CurrentTenant, RequestId, RequirePermission } from '../../common/decorators.js';
@@ -10,11 +10,17 @@ import { CurrentTenant, RequestId, RequirePermission } from '../../common/decora
 const idSchema = z.string().uuid();
 
 const createAgentSchema = z.object({
+  /**
+   * Start from a pre-built template. Its instructions, ceiling and tools are
+   * used as DEFAULTS — anything sent explicitly still wins, so a template is a
+   * starting point rather than a locked configuration.
+   */
+  templateId: z.string().max(60).optional(),
   name: z.string().min(1).max(120),
   description: z.string().max(2000).nullish(),
   instructions: z.string().max(20_000).default(''),
-  permissionLevel: z.enum([RiskLevel.READ, RiskLevel.DRAFT, RiskLevel.EXECUTE]),
-  tools: z.array(z.string().max(80)).max(40).default([]),
+  permissionLevel: z.enum([RiskLevel.READ, RiskLevel.DRAFT, RiskLevel.EXECUTE]).optional(),
+  tools: z.array(z.string().max(80)).max(40).optional(),
   maxSteps: z.number().int().min(1).max(50).optional(),
 });
 
@@ -51,6 +57,33 @@ export class AgentsController {
     return { tools: toolCatalogue(this.runner.tools()) };
   }
 
+  /**
+   * Pre-built business agents (§25, §26).
+   *
+   * A template is a name, instructions, a risk ceiling and a tool allowlist,
+   * and creating one from a template creates an ordinary agent row. It grants
+   * nothing: an agent built from an official template passes through exactly
+   * the same authorisation gates as one someone typed in by hand.
+   *
+   * `limitations` is returned and is never empty. A picker that lists six
+   * capabilities and no limits sells a product that does not exist, and the
+   * user finds out from a wrong answer instead of from us.
+   */
+  @RequirePermission(Permission.PROJECT_READ)
+  @Get('templates')
+  async templates() {
+    return {
+      templates: AGENT_TEMPLATES.map((template) => ({
+        id: template.id,
+        name: template.name,
+        summary: template.summary,
+        limitations: template.limitations,
+        permissionLevel: template.permissionLevel,
+        tools: template.tools,
+      })),
+    };
+  }
+
   @RequirePermission(Permission.PROJECT_READ)
   @Get()
   async list(@CurrentTenant() tenant: TenantContext) {
@@ -65,8 +98,32 @@ export class AgentsController {
     @RequestId() requestId: string,
   ) {
     const input = parse(createAgentSchema, stripTenantKeys((body ?? {}) as Record<string, unknown>));
+
+    /*
+     * A template supplies DEFAULTS, not a locked configuration. An explicit
+     * value always wins, so a user who picked "Research assistant" and then
+     * removed a tool gets the agent they configured.
+     *
+     * An unknown templateId is rejected rather than ignored: silently creating
+     * an agent with no tools because a name was misspelled looks exactly like
+     * a broken runtime the first time it is run.
+     */
+    const template = input.templateId ? findTemplate(input.templateId) : undefined;
+    if (input.templateId && !template) {
+      throw new ValidationError({ templateId: `Unknown template "${input.templateId}".` });
+    }
+
+    const resolved = {
+      name: input.name,
+      description: input.description ?? null,
+      instructions: input.instructions || (template?.instructions ?? ''),
+      permissionLevel: input.permissionLevel ?? template?.permissionLevel ?? RiskLevel.READ,
+      tools: input.tools ?? template?.tools ?? [],
+      ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
+    };
+
     return {
-      agent: await this.agents.create(tenant, input, this.runner.tools(), { requestId }),
+      agent: await this.agents.create(tenant, resolved, this.runner.tools(), { requestId }),
     };
   }
 

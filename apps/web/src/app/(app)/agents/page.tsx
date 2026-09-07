@@ -1,6 +1,7 @@
 import { serverApiOrNull } from '@/lib/api-server';
 import { Badge, Card, CardHeader, EmptyState } from '@/components/ui';
 import { ApprovalInbox } from '@/components/approval-inbox';
+import { AgentBuilder } from '@/components/agent-builder';
 
 interface AgentsResponse {
   agents: Array<{
@@ -21,6 +22,18 @@ interface ToolsResponse {
     risk: string;
     permission: string;
     requiresApproval: boolean;
+    customerSafe: boolean;
+  }>;
+}
+
+interface TemplatesResponse {
+  templates: Array<{
+    id: string;
+    name: string;
+    summary: string;
+    limitations: string[];
+    permissionLevel: string;
+    tools: string[];
   }>;
 }
 
@@ -50,15 +63,17 @@ interface RunsResponse {
 }
 
 export default async function AgentsPage() {
-  const [agentsData, toolsData, approvalsData, runsData] = await Promise.all([
+  const [agentsData, toolsData, approvalsData, runsData, templatesData] = await Promise.all([
     serverApiOrNull<AgentsResponse>('/v1/agents'),
     serverApiOrNull<ToolsResponse>('/v1/agents/tools'),
     serverApiOrNull<ApprovalsResponse>('/v1/agents/approvals'),
     serverApiOrNull<RunsResponse>('/v1/agents/runs'),
+    serverApiOrNull<TemplatesResponse>('/v1/agents/templates'),
   ]);
 
   const agents = agentsData?.agents ?? [];
   const tools = toolsData?.tools ?? [];
+  const templates = templatesData?.templates ?? [];
   const approvals = approvalsData?.approvals ?? [];
   const runs = runsData?.runs ?? [];
 
@@ -74,6 +89,8 @@ export default async function AgentsPage() {
 
       {/* Pending approvals come first: someone is blocked waiting on them. */}
       <ApprovalInbox approvals={approvals} />
+
+      <AgentBuilder templates={templates} tools={tools} />
 
       <Card>
         <CardHeader
@@ -105,7 +122,7 @@ export default async function AgentsPage() {
         {agents.length === 0 ? (
           <EmptyState
             title="No agents yet"
-            description="Agents are created through the API in this phase; the builder wizard arrives with the business agents."
+            description="Start from a template above, or build one from scratch."
           />
         ) : (
           <ul className="divide-y divide-[--color-line]">

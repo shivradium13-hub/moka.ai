@@ -42,6 +42,16 @@ export const Permission = {
   PROJECT_DELETE: 'project:delete',
 
   AUDIT_READ: 'audit:read',
+
+  /**
+   * Run a web-research task (Phase 7).
+   *
+   * Its own permission rather than reusing PROJECT_READ, because research is
+   * not a read of our data. It spends provider tokens on every run and sends
+   * outbound requests, from our address range, to whoever is being researched.
+   * Both of those are things a viewer should not be able to cause.
+   */
+  RESEARCH_RUN: 'research:run',
 } as const;
 
 export type Permission = (typeof Permission)[keyof typeof Permission];
@@ -56,6 +66,9 @@ const MEMBER_PERMISSIONS: readonly Permission[] = [
   ...VIEWER_PERMISSIONS,
   Permission.PROJECT_CREATE,
   Permission.PROJECT_UPDATE,
+  // Deliberately not a viewer capability: research spends money and makes
+  // outbound requests in the organization's name.
+  Permission.RESEARCH_RUN,
 ];
 
 const ADMIN_PERMISSIONS: readonly Permission[] = [

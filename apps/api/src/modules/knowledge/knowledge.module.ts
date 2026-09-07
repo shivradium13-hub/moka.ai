@@ -7,6 +7,6 @@ import { RetrievalService } from './retrieval.service.js';
 @Module({
   controllers: [KnowledgeController],
   providers: [KnowledgeService, IngestionService, RetrievalService],
-  exports: [RetrievalService],
+  exports: [RetrievalService, IngestionService],
 })
 export class KnowledgeModule {}

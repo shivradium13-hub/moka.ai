@@ -29,6 +29,8 @@ export interface DocumentDto {
   id: string;
   sourceId: string;
   title: string;
+  /** Where a crawled page came from. Null for an uploaded file. */
+  url: string | null;
   mimeType: string;
   byteSize: number;
   pageCount: number | null;
@@ -174,6 +176,10 @@ export class KnowledgeService {
           id: knowledgeDocuments.id,
           sourceId: knowledgeDocuments.sourceId,
           title: knowledgeDocuments.title,
+          // Where a crawled page came from. Null for an upload. Surfaced so a
+          // document indexed from the web can be traced back to it — an
+          // untraceable crawled page is a citation nobody can check.
+          url: knowledgeDocuments.url,
           mimeType: knowledgeDocuments.mimeType,
           byteSize: knowledgeDocuments.byteSize,
           pageCount: knowledgeDocuments.pageCount,
@@ -200,6 +206,7 @@ export class KnowledgeService {
         id: row.id,
         sourceId: row.sourceId,
         title: row.title,
+        url: row.url,
         mimeType: row.mimeType,
         byteSize: row.byteSize,
         pageCount: row.pageCount,

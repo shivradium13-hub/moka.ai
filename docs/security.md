@@ -224,29 +224,113 @@ Suite 8 found exactly that on `chatbot_sources`. `0010_chat_tenant_integrity.sql
 
 **Known item:** the same shape exists on some earlier joins, `agent_tools.agent_id` among them. None leaks today — the referenced data is itself RLS-protected and the application layer checks ownership — but "two independent controls happen to save us" is not "this cannot happen". Converting the Phase 1–5 joins belongs in its own reviewed change rather than being folded into this phase.
 
+### 4.6 Citation integrity (§9, §45)
+
+**Implemented in Phase 7.** The gate: *no fabricated citations.*
+
+The failure mode is specific and well documented. Ask a model to research something and cite its sources, and it will produce a bibliography — plausible titles, plausible authors, URLs that resolve to nothing or to something else entirely. It is not lying; it is completing a pattern. And a fabricated citation is worse than no citation, because it converts an unsupported claim into an apparently sourced one, which is exactly the form people stop checking.
+
+**So the model is never given the chance.** It does not write URLs. It writes `[3]`.
+
+#### The ledger
+
+Every URL in a finished answer comes from a record of documents the system actually fetched: the final URL **after redirects**, the fetch time, a SHA-256 of the bytes, and the exact excerpt placed in the prompt. Ids are assigned in fetch order and are the only handle a model is given. A citation is a lookup, not a generation.
+
+What the model is shown is `[1] Pricing — example.com`: a number, a title and a **host**. Not the URL. The host is what it needs to weigh credibility — the vendor's own documentation versus a forum post — and is not enough to reconstruct a citable link. Putting the full URL in the prompt would place the exact string we are trying to keep it from producing directly into its context.
+
+#### Verification, after the fact
+
+`verifyAnswer` runs on what the model actually said, in the same spirit as Phase 6's grounding check:
+
+| Check | Action |
+|---|---|
+| A `[n]` naming no ledger entry | **Removed** and reported. Leaving it shows a reader a citation for a claim that has none. |
+| An absolute URL appearing in no fetched excerpt | **Removed** and reported. A model quoting a link out of a page it read is reporting; one producing a link from training data is the failure being guarded against. |
+| A quoted span absent from the source it cites | **Flagged**, not deleted. Models paraphrase inside quotation marks often enough that deleting on a miss would mangle honest answers. |
+| No valid citation at all | Reported as `unsupported`. Sometimes legitimate ("I could not find anything on this"), so the caller decides. |
+
+#### The refusal that matters most
+
+When nothing could be collected, **the model is not called at all**. Handing a model a question, an instruction to cite everything, and nothing to cite is the single most reliable way to produce an invented bibliography. Refusing costs one provider call and saves a fabrication. The same applies when search itself fails: there is deliberately no fallback to "answer anyway", because an answer produced with no search is an answer from training data wearing a research feature's clothes.
+
+#### Auditable afterwards
+
+`research_sources` persists the ledger, including the excerpt. Six months later anyone can open a run and see the URL that was fetched, when, a hash of what came back, and the exact text in front of the model when it wrote a given sentence. That turns "the system does not fabricate sources" from an assertion about code into something a person can verify from a row.
+
+Candidates that were **not** collected are stored too, with the reason. An answer that used two sources out of nine is a different answer from one that had two candidates, and the reader deserves to be able to tell.
+
+Both the verified answer and the **raw** one are kept. If the system silently corrected an answer, the person relying on it should be able to see what was corrected; storing only the tidied version would hide our own edits from the only people who would want to review them.
+
+#### What this does not claim
+
+None of it makes the prose true. It makes every source attached to the prose real, which is a smaller claim and an honest one. A model can still misread a page it genuinely fetched.
+
 ---
 
-## 5. SSRF defence (§14, §29, §30)
+## 5. SSRF defence and egress policy (§14, §29, §30)
 
-All outbound HTTP from the crawler, research pipeline, browser agent, MCP client and any tool goes through **one** function, `safeFetch`, in `packages/net`. Direct use of `fetch`/`axios` outside that package is blocked by lint rule and reviewed in CI.
+**Security suite 6** (`tests/security/ssrf.test.ts`) — the Phase 7 gate.
+
+All outbound HTTP from the crawler, research pipeline and any tool goes through **one** function, `safeFetch`, in `packages/net`. Direct use of `fetch`/`axios` outside that package is blocked by a lint rule.
 
 `safeFetch` enforces:
 
 1. Scheme allowlist: `http`, `https` only.
-2. **DNS resolution before connect**, with the resolved IP checked against blocked ranges:
+2. **Address classification at connect time**, via a custom `lookup` on the undici agent, with the resolved IP checked against blocked ranges:
    - loopback `127.0.0.0/8`, `::1`
    - private `10/8`, `172.16/12`, `192.168/16`, `fc00::/7`
    - link-local `169.254.0.0/16`, `fe80::/10` — including **`169.254.169.254`** (cloud metadata)
    - CGNAT `100.64.0.0/10`
    - unspecified, multicast, reserved
-3. **Re-validation after every redirect** (this is where naive implementations fail), with a redirect cap.
-4. Pinning the validated IP for the actual connection, closing the DNS-rebinding window between check and connect.
-5. Per-domain rate limiting and politeness delay.
+   - IPv4-mapped IPv6 forms of all of the above (`::ffff:127.0.0.1`)
+3. **Re-validation after every redirect.** Redirects are followed manually for this reason; undici's automatic following would bypass the per-hop check.
+4. Only the addresses that PASSED are handed back to the socket, so a name resolving to both a public and a private address never falls back to the private one. This is where DNS rebinding is actually defeated: there is no window between check and connect.
+5. Blocked ports for high-value internal services (databases, caches, container control planes).
 6. Response size cap and hard timeout.
-7. Optional per-organization domain allowlist, mandatory for the browser agent.
-8. No credential or cookie forwarding across origins.
+7. Optional per-request host allowlist.
 
-The crawler additionally honours `robots.txt`, applies page and depth limits, deduplicates by canonical URL, and restricts crawling to the domains the organization has verified.
+### What suite 6 tests that the unit tests do not
+
+`packages/net` already tests `safeFetch` in isolation. Suite 6 tests something different and historically more likely to be wrong: that the **features** which make outbound requests actually go through it, and that the guard still holds when reached the way an attacker would reach it — through a research URL, a crawl seed, or a redirect from a page we were legitimately reading.
+
+A guard that is correct and bypassed is not a guard. Most SSRF incidents are not a broken IP check; they are a second code path that forgot to call it.
+
+The suite assumes the attacker can put any URL into a research request or a crawl seed, controls a web server our crawler will read, and can make that server redirect anywhere and resolve DNS to anything.
+
+### robots.txt is an egress control, not a courtesy
+
+`packages/net/robots.ts` implements RFC 9309: group matching on `User-agent`, `Allow`/`Disallow` with longest-match-wins and Allow winning ties, `*` and `$` wildcards, plus `Crawl-delay` and `Sitemap`.
+
+It lives next to `safeFetch` because the two answer the same kind of question. SSRF rules decide *which addresses* we may dial; robots rules decide *which paths we are permitted to*. The brief forbids bypassing a provider's terms, and a site's robots.txt is the machine-readable form of its terms for automated clients.
+
+The failure policy is the part worth stating (RFC 9309 §2.3.1):
+
+| robots.txt fetch | Decision |
+|---|---|
+| 404 / 410 | **Allow.** The site has no robots.txt and has restricted nothing. |
+| 401 / 403 | **Deny.** A server that will not show us its rules has not invited us to guess them. |
+| 5xx / network error | **Deny.** Crawling blind because we could not read the rules is the cautious reading in reverse. |
+
+Pattern matching escapes regex metacharacters before compiling: a robots pattern is attacker-controlled text from a third-party site, and an unescaped `.` silently widens a rule while an unescaped `(` throws.
+
+The crawler additionally honours `<meta name="robots" content="noindex">` by reading a page and **not storing it**, and per-link `rel="nofollow"`. It presents an honest user agent (`MokaAI-Crawler/1.0 (+https://moka.ai/bot)`) so a site owner can block us specifically; impersonating a browser would be a small deception with no upside and would defeat the token we ask sites to match on.
+
+### The one legitimate private-address exception
+
+`configuredInternalHosts` permits named hosts to resolve to private addresses. It exists because a self-hosted SearXNG usually is on one, and the distinction that makes it safe is the **source of the value, not its shape**:
+
+- A URL derived from a **request** — a crawl target, a page a model asked for — is attacker-influenceable and never gets this. That is the entire SSRF threat, and nothing in the codebase passes such a value here.
+- A URL from validated **boot configuration** is chosen by the person running the server, who could equally point `DATABASE_URL` at an internal host. Refusing it would not add safety; it would push operators to disable the guard wholesale, which is strictly worse.
+
+It remains an allowlist of exact hostnames: every other address stays blocked on the same request, and a redirect cannot walk from the permitted host into another private one. Suite 6 asserts both.
+
+`testOnlyAllowPrivateHosts` is a separate, narrower hatch that throws in production. It exists so the transport path can be exercised against a local server.
+
+### Attribution of refusals
+
+An SSRF refusal is never reported as a robots decision. The robots check fetches `robots.txt`, so an internal address fails there first — and reporting "their robots.txt disallows it" about `169.254.169.254` would be a false statement about a publisher that does not exist, while hiding the real cause from the operator reading the result. The error propagates and is re-classified by the caller.
+
+User-facing detail is deliberately coarse in both cases. A caller who can tell "blocked because private" from "blocked because it did not resolve" has a working internal port scanner.
 
 ---
 
@@ -306,13 +390,13 @@ These live in `tests/security/` and run against real PostgreSQL and Valkey in CI
 | 3 | Credential exposure | No API response, log line, trace, error or prompt contains a credential value |
 | 4 | Privilege escalation | A member cannot assume admin or owner capabilities; a key cannot widen its scopes |
 | 5 | Prompt injection | Injected instructions in documents, crawled pages, tool output and user messages fail to alter tool allowlists, permissions, credentials, approval requirements or egress targets |
-| 6 | SSRF | Every blocked range is rejected, including after redirect chains and rebinding attempts, across crawler, research, browser and MCP |
+| 6 | SSRF | Every blocked range is rejected, including after redirect chains and rebinding attempts — asserted through the CRAWLER and RESEARCH features, not only against `safeFetch` itself. Plus robots.txt compliance and the bounds of the configured-internal-host exception |
 | 7 | Arbitrary command execution | No path reaches host command execution; sandbox escape attempts fail |
 | 8 | Customer boundary | A chatbot visitor holds no role; reaches exactly one conversation in one organization; reads only explicitly published knowledge; and the widget ships no secret |
 | 9 | File access isolation | Uploaded files are reachable only within the owning organization; path traversal fails |
 | 10 | Knowledge isolation | Retrieval, citation and re-index paths never surface another organization's chunks |
 
-Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6.
+Suite 1 gates Phase 1. Suite 10 gates Phase 2. Suites 2 and 5 gate Phase 5. Suite 8 gates Phase 6. Suite 6 gates Phase 7, alongside the citation-integrity gate in §4.6.
 
 Suite 8 was originally scoped as "API authorization" (scopes, revocation, cross-organization key rejection). Those assertions did not disappear: the public deployment key IS the externally-presented key of this phase, and revocation, cross-organization rejection and rate limiting are all asserted against it. Programmatic API keys for staff integrations arrive with Phase 9.
 

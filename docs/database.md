@@ -235,6 +235,24 @@ PostgreSQL performs referential integrity checks **with row security disabled**,
 
 ---
 
+## 9b. Research runs (§8, §9) — IMPLEMENTED (0011)
+
+**`research_runs`** — `question`, `status`, `answer`, `raw_answer`, `search_provider`, `verification jsonb`, token counts.
+
+`raw_answer` is kept alongside the verified one deliberately. If the system silently corrected an answer, the person relying on it should be able to see what was corrected — storing only the tidied text would hide our own edits from the only people who would want to review them. `verification` records invalid markers, invented URLs and unverified quotes per run, so a *pattern* is visible: one fabricated URL is noise, the same prompt producing them every time is a fact worth being able to find.
+
+**`research_sources`** — the persisted citation ledger. `ordinal` (the citation number), `requested_url`, `final_url` (after redirects), `title`, `content_hash`, **`excerpt`**, `outcome`, `detail`, `fetched_at`.
+
+The excerpt is what makes the phase's gate checkable rather than merely asserted. "No fabricated citations" is a claim about a system; with the excerpt stored, anyone can open a six-month-old answer and see precisely what the model had in front of it when it wrote a sentence.
+
+Candidates that were **not** collected are stored too, with the reason, and get `ordinal = NULL` — a hole in the numbering would be a citation that resolves to nothing while looking valid. A `CHECK` constraint enforces that a `collected` row carries all four of ordinal, final URL, hash and timestamp, because a row missing any of them is a citation nobody can check.
+
+No `UPDATE` grant: a source record is what was fetched at a point in time, and a fetched page's hash is not something the application should be able to revise afterwards. `DELETE` is granted so a run can be removed with its evidence.
+
+Composite foreign keys throughout, for the reason established in 0010.
+
+---
+
 ## 10. Billing, entitlements, usage (§34, §35)
 
 Deliberately three layers, so limits are never hard-coded in application code:
@@ -299,7 +317,7 @@ Append-only: the `moka_app` role holds `INSERT` and `SELECT` grants but **no `UP
 
 Against the §36 list, with deviations noted:
 
-`users`, `organizations`, `organization_members`, `roles`, `permissions`, `role_permissions`*, `sessions`*, `projects`, `conversations`, `messages`, `providers`, `models`, `credentials`, `agents`, `agent_tools`, `agent_permissions`, `agent_knowledge`*, `agent_executions`*, `tools`, `tool_executions`, `knowledge_sources`, `knowledge_documents`, `knowledge_chunks`, `knowledge_embeddings`*, `embedding_models`*, `memories`, `chatbots`, `chatbot_deployments`, `subscriptions`, `plans`, `plan_entitlements`*, `entitlement_overrides`*, `usage_records`, `credits`, `credit_transactions`*, `chatbot_sources`*, `chat_conversations`*, `chat_messages`*, `api_keys`, `mcp_servers`, `mcp_tools`, `automations`, `automation_runs`, `approvals`, `audit_logs`
+`users`, `organizations`, `organization_members`, `roles`, `permissions`, `role_permissions`*, `sessions`*, `projects`, `conversations`, `messages`, `providers`, `models`, `credentials`, `agents`, `agent_tools`, `agent_permissions`, `agent_knowledge`*, `agent_executions`*, `tools`, `tool_executions`, `knowledge_sources`, `knowledge_documents`, `knowledge_chunks`, `knowledge_embeddings`*, `embedding_models`*, `memories`, `chatbots`, `chatbot_deployments`, `subscriptions`, `plans`, `plan_entitlements`*, `entitlement_overrides`*, `usage_records`, `credits`, `credit_transactions`*, `chatbot_sources`*, `chat_conversations`*, `chat_messages`*, `research_runs`*, `research_sources`*, `api_keys`, `mcp_servers`, `mcp_tools`, `automations`, `automation_runs`, `approvals`, `audit_logs`
 
 `*` = added beyond the §36 list, each for a stated reason:
 
@@ -308,6 +326,7 @@ Against the §36 list, with deviations noted:
 - **`plan_entitlements` / `entitlement_overrides`** — §34 explicitly requires `Plan → Entitlement → Usage → Enforcement` and forbids hard-coded limits. A flat `entitlements` table cannot express both plan defaults and per-organization exceptions.
 - **`chatbot_sources`** — the publication boundary between a chatbot and the knowledge it may quote. §36 assumed one implicit scope; making it an explicit join is what lets an organization decide, per chatbot, which internal documents become readable by the public.
 - **`chat_conversations` / `chat_messages`** — the §36 list has `conversations` and `messages` for STAFF chat. A visitor conversation is a different thing with a different principal, a different retention policy and a different token, and merging them would put an anonymous stranger's transcript in the same table as a member's.
+- **`research_runs` / `research_sources`** — §36 has no table for web research, and the citation ledger cannot live in `agent_executions`: a research run happens with or without an agent, and the evidence has to outlive the conversation that prompted it to be auditable at all.
 - **`role_permissions`, `sessions`, `agent_knowledge`, `credit_transactions`** — required join tables and ledgers, not redundant entities.
 
 No table in the §36 list has been dropped.

@@ -1,9 +1,10 @@
 # MOKA AI — Development Roadmap
 
-> **Status: Phase 6 (Customer Chatbot) COMPLETE.** Phases 1–6 done, with two
+> **Status: Phase 7 (Business Agents) COMPLETE.** Phases 1–7 done, with two
 > standing limits unchanged: no provider API key exists here, so no live model
 > call has been made; and pgvector is unavailable, so retrieval is lexical
-> (§B1). Verified 2026-09-07.
+> (§B1). A third is new and smaller: no web-search engine is configured, so
+> research runs against URLs a user supplies (§B4). Verified 2026-09-07.
 
 ---
 
@@ -523,6 +524,133 @@ The widget's browser behaviour — shadow DOM, iframe, `postMessage`, `sessionSt
 
 ---
 
+## Phase 7 — completion record
+
+**Gate met.** `pnpm verify` passes, and `pnpm test:security` passes against a real PostgreSQL 17 database including the new **security suite 6 — SSRF**.
+
+| Check | Result |
+|---|---|
+| Typecheck | 24/24 tasks, strict mode, zero errors |
+| Lint | 13/13 packages, 0 errors, 0 warnings |
+| Unit tests | **697 passed** (`@moka/research` 141 new, `@moka/net` +36, `@moka/agents` +15) |
+| Build | 13/13 packages |
+| **Security suites** | **151 passed** — SSRF 38 new |
+
+### The honest problem at the top of this phase
+
+Path C is "question → search → collect → extract → verify → synthesize → cite". Every stage is buildable with no paid dependency except the first, and there is no way to pretend otherwise:
+
+| Option | Verdict |
+|---|---|
+| Brave / Serper / Tavily / Exa / Bing APIs | Good, cheap, and **paid**. The brief permits paid services only where technically unavoidable, and this one is avoidable. None is bundled. |
+| Scraping Google or Bing | **Ruled out flatly.** The brief says never bypass a provider's terms, and their terms prohibit it. It would also break without warning and take a tenant's crawl down with it. |
+| **SearXNG, self-hosted** | FREE and open source. AGPL — run as a service, never linked into our code, so the licence obligation stays with the operator's own deployment. Supported, and the recommended configuration. |
+| **Explicit URLs** | No engine at all. Always available, needs nothing. |
+
+So the default is explicit URLs, SearXNG is used if the operator configures one, and **research works out of the box with sources a person names rather than appearing to work by inventing them**. `GET /v1/research/capabilities` reports which is configured, and the UI says "no search engine is configured" rather than offering a keyword box that silently returns nothing.
+
+For the most common real request — "read these three competitor pages and tell me what they say" — explicit URLs are not a fallback. They are the correct tool.
+
+### Gate 1 — no fabricated citations
+
+The model never writes a URL. It writes `[3]`.
+
+Every URL in a finished answer comes from a ledger of documents actually fetched: final URL after redirects, fetch time, SHA-256 of the bytes, and the exact excerpt placed in the prompt. What the model *sees* is `[1] Pricing — example.com` — a number, a title and a host. Not the URL, because putting the string we are trying to stop it producing directly into its context makes copying it the path of least resistance.
+
+`verifyAnswer` then runs on what it actually said:
+
+- a `[n]` naming no ledger entry is **removed** and reported;
+- an absolute URL appearing in no fetched excerpt is **removed** and reported;
+- a quotation absent from the source it cites is **flagged**, not deleted, because models paraphrase inside quotation marks and deleting on a miss would mangle honest answers.
+
+**And when nothing was collected, the model is not called at all.** Handing a model a question, an instruction to cite everything, and nothing to cite is the single most reliable way to produce an invented bibliography. The same applies when search fails: there is deliberately no fallback to "answer anyway".
+
+The UI shows the correction rather than hiding it. It would look better to quietly strip a fabricated citation and present a clean answer; it would also mean a user never learns that the model invents sources, which is the single most useful thing for them to know when deciding how much to trust the paragraph in front of them.
+
+### Gate 2 — SSRF, tested through the features
+
+`packages/net` already tested `safeFetch` in isolation. Suite 6 tests the thing historically more likely to be wrong: that the features which make outbound requests actually go through it, and that the guard holds when reached the way an attacker reaches it — a research URL, a crawl seed, a redirect from a page we were legitimately reading.
+
+A guard that is correct and bypassed is not a guard. Most SSRF incidents are not a broken IP check; they are a second code path that forgot to call it.
+
+### robots.txt is an egress control, not a courtesy
+
+`packages/net/robots.ts` implements RFC 9309 — group matching, longest-match precedence with Allow winning ties, `*` and `$` wildcards, `Crawl-delay`. It sits beside `safeFetch` because both are egress policy: SSRF rules decide which addresses we may dial, robots rules decide which paths we are permitted to.
+
+The failure policy is the part that matters. 404 permits; **401/403 and 5xx deny**. A server that will not show us its rules has not invited us to guess them, and crawling blind because we could not read them is the cautious reading in reverse.
+
+Pattern matching escapes regex metacharacters before compiling — a robots pattern is attacker-controlled text from a third-party site.
+
+### A misattribution found during verification
+
+The first end-to-end SSRF test reported every blocked address as `robots_disallowed`. Technically the robots check *had* refused it — because fetching `robots.txt` from `169.254.169.254` is itself blocked, and an unreadable robots.txt denies by default. Two controls in the right order, and a wrong explanation.
+
+It was still wrong to report. "Their robots.txt disallows it" is a false statement about a publisher that does not exist, and it hides the real cause from the operator reading the result. `RobotsService` now rethrows an egress refusal instead of folding it into a policy decision, and the pipeline re-classifies it as `blocked`.
+
+The user-facing detail stays coarse in both cases: a caller who can tell "blocked because private" from "blocked because it did not resolve" has a working internal port scanner.
+
+### Business agent templates (§25, §26)
+
+A template is a **name, instructions, a risk ceiling and a tool allowlist** — nothing else. It creates an ordinary agent row, and an agent built from an official template passes through exactly the same authorisation gates as one typed in by hand. §26 requires that; the cheapest way to guarantee it is for there to be no other gate.
+
+The list is shorter than the brief's, because a template can only be honest about tools that exist:
+
+| Template | What it actually is |
+|---|---|
+| Research assistant | The Path C pipeline. |
+| Website analyst | Reads a site you have crawled. Cannot edit or publish. |
+| Sales research assistant | Researches a prospect and drafts an approach. **Not connected to a CRM** — there isn't one. |
+| Marketing writer / Social drafter | Draft only. **Nothing can publish anything**, and the instructions say so, because a model claiming to have posted something is the failure that embarrasses a user in public. |
+| Workspace analyst | Reports on **this workspace**. Not Google Analytics. |
+| Project assistant | The only one above READ, and DRAFT rather than EXECUTE. |
+
+Every template carries a `limitations` list, it is never empty, and `validateTemplates` fails a test if one is. The builder shows it as prominently as the summary. A picker that lists six capabilities and no limits sells a product that does not exist, and the user finds out from a wrong answer instead of from us.
+
+`web_research` is deliberately **not** `customerSafe`. A public chatbot able to call it would be an open SSRF and traffic-amplification proxy, driven by strangers and billed to the organization that published the bot. A test asserts every tool in every template is refused for a customer principal.
+
+### A new permission
+
+`research:run`, granted to member and above — **not** to viewer. Research is not a read of our data: every run spends provider tokens and sends requests from our address range to whoever is being researched. Both are things a viewer should not be able to cause.
+
+### Mutation testing
+
+| Mutation | Result |
+|---|---|
+| Stop re-validating redirect hops in `safeFetch` | **3 security tests failed** — every redirect-escape case |
+| Answer anyway when nothing was collected | **5 unit + 6 security tests failed** |
+| Accept any citation marker without checking the ledger | **2 unit tests failed** |
+| Render model output as HTML in the chat widget (Phase 6 control, re-checked) | **2 unit tests failed** |
+
+### Verified end to end against the running stack, and against real sites
+
+- Research aimed at `169.254.169.254`, `127.0.0.1:55432`, `localhost:4000`, `file:///etc/passwd` and `example.com:6379` → **all five refused**, no model called, and every refusal attributed to the address rather than to a publisher
+- Crawl of `https://example.com/` → 1 page fetched, 1 indexed with its source URL recorded, and the one outbound link correctly rejected as off-host
+- Crawl of a Wikipedia path its robots.txt disallows → **0 pages fetched**, refusal reported with reason `robots`
+- Crawl of an SVG → fetched, correctly refused as not a readable document
+- IANA's `Disallow:` (empty, meaning "allow everything") correctly read as permissive — one of the parser traps, confirmed in production
+- Research against a real page → collected successfully, then failed at the provider with `PROVIDER_NO_CREDENTIAL`, which is the honest state with no API key
+- Agent created from the `research` template with the template's ceiling and tools; an unknown `templateId` rejected with a message naming the field rather than silently creating a tool-less agent
+
+### Deliberately not built
+
+| Not built | Why |
+|---|---|
+| A bundled search provider | The good ones are paid and the free ones prohibit scraping. Adding a paid adapter is a decision for whoever runs this, not a default. |
+| Asynchronous crawling | The job queue needs Valkey, which needs Docker (§B2). The page and byte budgets are what keep a crawl inside one request; the default of 50 pages is chosen so it finishes, not because 50 is the right number. |
+| A shared robots.txt cache | Same reason. Per-process caching is a real limitation behind multiple instances, not a correctness problem — every instance reaches the same decision from the same file. |
+| Sitemap-driven crawling | Parsed out of robots.txt and stored, not yet used to seed a crawl. |
+| A relevance threshold on excerpts | With no dense retriever (§B1) there is no embedding to score with, and a similarity number computed from nothing would be worse than the honest keyword window in use. |
+
+### Not verified
+
+**No live model call has been made.** There is still no provider API key, so synthesis has only run against a scripted model — which is what made the fabrication tests possible at all, since a real model sometimes behaves and a test that passes for that reason is a test of the model.
+
+**The SearXNG adapter has never spoken to a real instance.** There is none here and running one needs Docker (§B2). It follows the documented request and response shape and is tested against a local server speaking that shape — the same approach taken for the provider adapters in Phase 3, and honest about the same gap.
+
+The **fetch, extract, robots and SSRF halves are verified against real sites**, which is the half this phase's gates are about.
+
+---
+
 ## 0. Blockers to clear before Phase 2
 
 Three environment gaps must be closed. **None of them block Phase 1**, so work can start immediately while these are arranged.
@@ -539,6 +667,13 @@ Three environment gaps must be closed. **None of them block Phase 1**, so work c
 
 ### B2 — No Docker / WSL2 (blocks Phase 8; needed for Valkey)
 Virtualization is enabled in firmware, so WSL2 is installable. Required for the sandbox and browser-agent isolation. Valkey can alternatively run as a native Windows build (Memurai or a Valkey Windows port) if Docker is deferred.
+
+### B4 — No web search engine (limits Phase 7 research, does not block it)
+No search engine is configured. There is deliberately no bundled provider: the good ones are paid, and scraping the free ones violates their terms (§2). Research therefore runs against URLs a user supplies, which is the correct tool for "read these pages and tell me what they say" and is not a degraded mode for it.
+
+To enable keyword search, run a **SearXNG** instance (FREE, open source, AGPL — run as a service, so the obligation stays with the operator's deployment) and set `SEARXNG_URL`. It may be a private address; that exception is derived from the config value alone and never from a request. Docker makes this easiest, so B2 makes B4 easier too.
+
+The UI reports which mode it is in rather than offering a keyword box that silently returns nothing.
 
 ### B3 — Long paths disabled
 `LongPathsEnabled = 0`. A deep pnpm monorepo can exceed the 260-character limit. Fix by enabling long paths in the registry (admin, one reboot), or keep the repo root short — `D:\Ai` already is, which mitigates most of this.
@@ -623,7 +758,7 @@ Each phase closes only when its work is implemented, typed, tested, linted, buil
 | **4 — Moka Credentials** | Vault UI, encryption, BYOK, test/rotate/revoke, audit | **Security suite 3** in full | Phase 3 |
 | **5 — Agent Engine** | Runtime loop, tool engine, permission levels, approval engine, budgets, audit | **Security suites 2, 5** | Phases 3, 4 |
 | **6 — Customer Chatbot** *(COMPLETE)* | Builder, widget bundle, deployments, support agent, customer boundary, handoff | **Security suite 8** ✅; widget contains no secret ✅ | Phase 5 |
-| **7 — Business Agents** | Sales, analytics, website, marketing, social, research templates; Path C research pipeline | **Security suite 6 (SSRF)**; no fabricated citations | Phases 5, 6 |
+| **7 — Business Agents** *(COMPLETE)* | Templates, Path C research pipeline, website crawler, agent builder | **Security suite 6 (SSRF)** ✅; no fabricated citations ✅ | Phases 5, 6 |
 | **8 — Advanced AI** | Coding agent, sandbox, browser agent, MCP, agent-to-agent | **Security suites 7, 9** | **B2 resolved + a Linux host** |
 | **9 — SaaS** | Plans, entitlements, credits, usage dashboard, enforcement, billing adapter | Entitlement enforcement tests; no hard-coded limits | Phase 5 |
 | **10 — Production** | Security audit, performance and load testing, backup and restore drill, failure recovery, deployment, monitoring | Full security suite + restore drill | All |
