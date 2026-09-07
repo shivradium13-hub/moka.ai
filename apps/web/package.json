@@ -18,6 +18,7 @@
     "server-only": "^0.0.1"
   },
   "devDependencies": {
+    "@moka/config": "workspace:*",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",

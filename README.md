@@ -578,6 +578,7 @@ the runbook:
 - [docs/security.md](docs/security.md) — threat model, tenant isolation, credentials, AI-specific controls
 - [docs/database.md](docs/database.md) — schema, conventions, migration safety
 - [docs/security-audit.md](docs/security-audit.md) — findings, threat-model coverage, accepted risks
+- [docs/deployment.md](docs/deployment.md) — where each piece goes (web on Vercel, API on a container host) and why
 - [docs/operations.md](docs/operations.md) — deploy, backup, restore, failure recovery, monitoring
 - [docs/performance.md](docs/performance.md) — measured isolation overhead, and what is not measured
 - [docs/roadmap.md](docs/roadmap.md) — phase plan and blockers
