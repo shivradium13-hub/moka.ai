@@ -38,7 +38,13 @@ The repo has no git remote yet. Push it somewhere Vercel can read, then import t
 
 The `...` suffix is not decoration — it tells Turborepo to build `@moka/web` **and its dependencies**. `@moka/core` resolves to `dist/`, so a build that skipped it would fail on a missing module. Verified from a clean tree: 11 tasks, ~39s cold.
 
-### 2.3 Environment variables
+### 2.3 One thing to check before the first build
+
+The repo pins `"packageManager": "pnpm@12.3.4"` and `"engines": { "node": ">=20.11.0" }`. Vercel reads `packageManager` and provisions that pnpm through corepack.
+
+If the build image does not yet offer pnpm 12, the install step fails immediately and loudly — which is the good kind of failure, but it will be your first one. Either select a newer Node version in **Project Settings → General → Node.js Version**, or pin `packageManager` to a pnpm major the image supports and re-run `pnpm install` locally so the lockfile matches. Do not delete the field: without it Vercel guesses, and a guessed package manager against a `pnpm-lock.yaml` is how a build resolves different dependency versions than the ones that were tested.
+
+### 2.4 Environment variables
 
 Only one is required:
 
@@ -48,7 +54,7 @@ Only one is required:
 
 **Set it before the first build.** `NEXT_PUBLIC_` variables are inlined at build time, so changing it later needs a redeploy, not a restart.
 
-### 2.4 The build refuses to publish secrets
+### 2.5 The build refuses to publish secrets
 
 `apps/web/next.config.mjs` runs `findLeakyPublicVars` — the same function that stops the API booting with a leaky variable — and **throws** if any `NEXT_PUBLIC_` name looks like a secret (`secret`, `password`, `token`, `api_key`, `private`, `credential`, `encryption`, `database_url`, `_dsn`).
 
@@ -62,7 +68,7 @@ would be inlined into the browser bundle, where every visitor can read them:
 NEXT_PUBLIC_ENCRYPTION_KEY.
 ```
 
-### 2.5 After it deploys
+### 2.6 After it deploys
 
 Add the Vercel domain to the API's `CORS_ORIGINS`, or every authenticated request will fail at the browser. The app's routes authenticate by cookie, so CORS is doing real work there — it is what stops another site making authenticated requests with a user's session.
 
