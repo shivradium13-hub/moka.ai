@@ -155,6 +155,29 @@ API_HOST=0.0.0.0
 > defence; the Origin check on state-changing requests replaces it, but not
 > needing the trade at all is better than replacing it.
 
+### Generate and validate the block instead of typing it
+
+Fifteen variables, several of which fail the deploy if they are subtly wrong,
+is a poor thing to assemble by hand. This builds the whole block and checks it
+against `loadConfig` — the same function `main.ts` calls at boot — so a block
+that gets written is one that will get past configuration:
+
+```bash
+node infra/deploy/railway-env.mjs --db-host <host> --app-url https://<your-project>.vercel.app --redis-url <redis url>
+```
+
+It reads `AUTH_SECRET` and `ENCRYPTION_KEY` from `local/deploy-secrets.txt`
+rather than minting them, so re-running it cannot silently rotate the
+encryption key and make every stored credential unreadable. Output goes to
+`local/railway-variables.txt`, which is gitignored because it contains that
+key. Add `--same-site lax --cookie-domain .yourdomain.com` if you put both
+services under one domain.
+
+If it refuses, it names the reason and writes nothing — a plaintext origin, a
+cookie domain no origin sits under, a localhost origin in production. Each of
+those would otherwise be a failed remote deploy and a scroll through a build
+log.
+
 Generate the two secrets separately — they must not be the same value:
 
 ```bash

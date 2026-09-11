@@ -121,6 +121,9 @@ importers:
       '@moka/chat':
         specifier: workspace:*
         version: link:packages/chat
+      '@moka/config':
+        specifier: workspace:*
+        version: link:packages/config
       '@moka/core':
         specifier: workspace:*
         version: link:packages/core

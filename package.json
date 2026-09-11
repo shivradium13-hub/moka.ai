@@ -23,13 +23,15 @@
     "db:backup": "node infra/db/backup.mjs",
     "db:restore": "node infra/db/restore.mjs",
     "billing:reconcile": "node infra/billing/reconcile.mjs",
-    "bench": "node infra/bench/benchmark.mjs"
+    "bench": "node infra/bench/benchmark.mjs",
+    "deploy:env": "node infra/deploy/railway-env.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@moka/agents": "workspace:*",
     "@moka/billing": "workspace:*",
     "@moka/chat": "workspace:*",
+    "@moka/config": "workspace:*",
     "@moka/core": "workspace:*",
     "@moka/crypto": "workspace:*",
     "@moka/db": "workspace:*",
