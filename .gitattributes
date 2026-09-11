@@ -1,0 +1,53 @@
+# =============================================================================
+# Line endings
+#
+# THIS FILE EXISTS BECAUSE OF A REAL TRAP, NOT AS BOILERPLATE.
+#
+# This repository is developed on Windows with `core.autocrlf=true`, which
+# rewrites LF to CRLF on checkout. That is harmless for TypeScript and fatal
+# for files a Linux kernel or a container runtime has to parse:
+#
+#   * a shell script with CRLF fails with "bad interpreter: /bin/sh^M";
+#   * a Dockerfile with CRLF can carry a stray \r into ENV values and into
+#     RUN commands, producing errors that name a line which looks correct.
+#
+# The failure appears only in the container, never on the machine that wrote
+# the file, which is the worst place for it to appear.
+#
+# `text eol=lf` forces LF in the working tree regardless of the local
+# `autocrlf` setting, so this holds for anyone who clones the repository — it
+# is not a per-developer configuration that has to be remembered.
+# =============================================================================
+
+# Default: let git normalise text, and detect binary automatically.
+* text=auto
+
+# Anything Linux parses directly.
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+.dockerignore   text eol=lf
+*.sh            text eol=lf
+*.bash          text eol=lf
+
+# SQL, for consistency only.
+#
+# Checked rather than assumed: migration checksums are NOT at risk here.
+# packages/db/scripts/migrate.ts normalises CRLF to LF before it hashes the
+# file, so a line-ending change cannot alter a checksum or trip the
+# immutability guard on an already-applied migration. Written down because
+# the opposite is the obvious assumption, and believing it would mean never
+# touching these files again.
+*.sql           text eol=lf
+
+# Lockfile: never normalise. A rewritten lockfile is a diff nobody can review.
+pnpm-lock.yaml  -text
+
+# Binary assets, so git never tries to normalise them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

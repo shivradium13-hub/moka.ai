@@ -1,0 +1,69 @@
+# =============================================================================
+# Docker build context exclusions
+#
+# THE FIRST BLOCK IS A SECURITY CONTROL, NOT AN OPTIMISATION.
+#
+# Everything in the build context is readable by every layer of the build, and
+# anything COPYed in survives in the image even if a later layer deletes it.
+# `.env` holds ENCRYPTION_KEY — the master key for the credential vault — and
+# an image is a file that gets pushed to a registry and pulled by anyone with
+# access to it.
+#
+# `.gitignore` already excludes `.env` from git. It does NOT exclude it from a
+# Docker build: the build context is the directory on disk, not the git index.
+# Two separate mechanisms, and both have to be right.
+# =============================================================================
+
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+local/
+backups/
+
+# --- Never copy host node_modules -------------------------------------------
+# They contain binaries resolved for Windows. The image installs its own from
+# the same lockfile, with the Linux platform resolved instead.
+node_modules
+**/node_modules
+
+# --- Build output, rebuilt inside the image ----------------------------------
+# Copying host output would ship whatever happened to be on a developer's disk
+# rather than what the lockfile reproducibly produces.
+dist
+**/dist
+.next
+**/.next
+.turbo
+**/.turbo
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# --- The web app ------------------------------------------------------------
+# Its SOURCE is not needed: this image is the API, and the web app deploys to
+# Vercel separately.
+#
+# Its `package.json` IS needed and is deliberately kept. `apps/web` is a member
+# of the pnpm workspace and appears in `pnpm-lock.yaml`; with the manifest
+# missing, `pnpm install --frozen-lockfile` treats the lockfile as out of date
+# and fails the build. Verified against the lockfile rather than assumed.
+apps/web/*
+!apps/web/package.json
+
+# --- Not needed to build or run the API -------------------------------------
+# `tests/` is not a workspace member (the workspace is `apps/*` + `packages/*`),
+# so excluding it cannot affect dependency resolution. Test files are already
+# excluded by apps/api/tsconfig.build.json.
+.git
+.github
+.vercel
+docs
+tests
+**/*.test.ts
+**/*.spec.ts
+coverage
+.vscode
+.idea
+*.log
+README.md

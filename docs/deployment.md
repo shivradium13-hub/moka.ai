@@ -11,7 +11,7 @@ MOKA AI is two deployable units with different shapes, and they do not belong on
 | Unit | What it is | Vercel? |
 |---|---|---|
 | `apps/web` | Next.js 15. Pure API client: no database access, no server routes, one workspace dependency. | **Yes.** This is exactly what Vercel is for. |
-| `apps/api` | NestJS on Fastify. Long-running process, connection pool, local disk, in-request agent loops. | **No.** Three things break silently. §3 says which. |
+| `apps/api` | NestJS on Fastify. Long-running process, connection pool, local disk, in-request agent loops. | **No.** Three things break silently — see the note in §2. Railway instead: §3. |
 
 So: **web on Vercel, API on a container host, PostgreSQL managed.**
 
@@ -20,6 +20,18 @@ That is not a limitation of Vercel. It is what the API currently is — a statef
 ---
 
 ## 2. Deploying the web app to Vercel
+
+> **Why the API is not here.** Three things break on serverless, two of them
+> silently. Uploads: `IngestionService` builds `LocalStorageDriver`
+> unconditionally and `STORAGE_DRIVER=s3` is accepted then ignored, so on a
+> filesystem that is read-only except a per-invocation `/tmp`, an upload
+> returns `200` and the bytes cease to exist. Rate limiting: production demands
+> `REDIS_URL` but the Redis driver is still a TODO, so per-invocation means no
+> limiting at all while the config gate makes it look configured. And the API
+> is a server, not a handler — `app.listen()` plus a connection pool per
+> instance, with agent loops running inline past any function timeout. §3 puts
+> it on Railway instead.
+
 
 ### 2.1 What you need first
 
@@ -74,35 +86,134 @@ Add the Vercel domain to the API's `CORS_ORIGINS`, or every authenticated reques
 
 ---
 
-## 3. Why the API does not go on Vercel
+## 3. Deploying the API to Railway
 
-Not a matter of taste. Three concrete things break, and the first two break **silently**, which is the failure mode this codebase spends the most effort avoiding.
+`Dockerfile`, `.dockerignore` and `railway.json` are in the repository root and are already configured. Railway reads `railway.json` automatically, so there is nothing to fill in on the Build tab.
 
-### 3.1 Every uploaded file would be lost
+### 3.1 Create the service
 
-`IngestionService` constructs `LocalStorageDriver(config.STORAGE_LOCAL_PATH)` unconditionally. `STORAGE_DRIVER=s3` is accepted by the config schema and then **ignored** — the S3 driver is an open TODO (`Phase 2b`), because the obvious candidate (MinIO) is AGPLv3 and that licence reaches a hosted SaaS.
+1. [railway.app/new](https://railway.app/new) → **Deploy from GitHub repo** → pick `moka.ai`.
+2. Leave the root directory as the repository root. **Do not set it to `apps/api`** — the Dockerfile builds the whole workspace and the pnpm lockfile lives at the root.
+3. Railway detects `railway.json`, sees `"builder": "DOCKERFILE"`, and stops guessing.
 
-A serverless filesystem is read-only except `/tmp`, and `/tmp` does not survive the invocation. So an upload would return `200`, write bytes that immediately cease to exist, and fail at retrieval. The Knowledge Engine would look like it worked.
+### 3.2 Add a volume — before the first deploy
 
-**Needed first:** an S3-compatible storage driver.
+**Settings → Volumes → New Volume**, mount path exactly:
 
-### 3.2 Rate limiting would be worse than none
+```
+/data
+```
 
-Production config **refuses to boot without `REDIS_URL`** — a guard added precisely so the in-memory limiter could not silently become the production limiter. But `ValkeyRateLimiter` is still a TODO. Only `InMemoryRateLimiter` exists.
+Uploaded documents are written to disk. Without a volume they live in the container's writable layer and are destroyed on every redeploy — the upload returns `200` and the file is gone by the next deploy. The image creates `/data/storage` and chowns it to the non-root user, so an empty volume mounted there is writable immediately.
 
-On one long-running box that means "per-process", which is a real limitation and is documented as one. On serverless it means **per-invocation** — every request potentially gets a fresh empty bucket, so there is effectively no rate limiting at all, while the config gate makes the deployment look correctly configured. A limit that reports as present and is absent is worse than one that is honestly missing.
+### 3.3 Environment variables — the complete list
 
-**Needed first:** the Valkey/Redis rate limiter.
+Paste these into **Variables → Raw Editor**. Replace every `<...>`. Nothing here has a default that is safe to leave.
 
-### 3.3 It is a server, not a handler
+```
+NODE_ENV=production
+LOG_LEVEL=info
 
-`main.ts` calls `app.listen()` and holds a `pg.Pool`. Serverless needs an exported handler, and each concurrent instance would open its own pool — exhausting Postgres connections without a pooler in front.
+DATABASE_URL=postgresql://moka_app:<APP_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require
+DATABASE_MIGRATION_URL=postgresql://moka_migrator:<MIGRATOR_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require
+DATABASE_SSL=true
+DATABASE_POOL_MAX=10
 
-Two smaller consequences follow. `assertRuntimeRoleIsConstrained()` runs at boot, which on serverless means on every cold start, adding a `pg_roles` round trip each time. And agent runs, crawls and research all execute **inline in the request** — a 10-step agent loop against a real provider will exceed Vercel's function ceiling routinely.
+AUTH_SECRET=<32 random bytes, base64>
+ENCRYPTION_KEY=<32 random bytes, base64>
+SESSION_TTL_SECONDS=2592000
 
-### 3.4 What to use instead
+REDIS_URL=<redis:// or rediss:// URL>
 
-Any host that runs a container or a long-lived Node process: Railway, Render, Fly.io, or a plain VPS. `pnpm build && node apps/api/dist/main.js` is the whole runtime story. See `docs/operations.md` for the deployment, backup and monitoring runbook.
+STORAGE_DRIVER=local
+STORAGE_LOCAL_PATH=/data/storage
+
+CORS_ORIGINS=https://<your-project>.vercel.app
+
+API_HOST=0.0.0.0
+```
+
+Generate the two secrets separately — they must not be the same value:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+**Do not set `PORT`.** Railway injects it, and the container maps it to `API_PORT` at startup. Setting it yourself will fight the platform.
+
+**Do not set `API_PORT`.** Same reason — it is derived.
+
+**Do not set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY`.** Production refuses to boot with them, on purpose: an instance-wide key means every organization spends the operator's key, which makes per-tenant cost attribution, quotas and revocation fictional. Provider credentials belong to an organization, added through Moka Credentials.
+
+What each one is for, and what happens if it is wrong:
+
+| Variable | Required | If wrong |
+|---|---|---|
+| `NODE_ENV` | yes | Anything but `production` skips every hardening check below |
+| `DATABASE_URL` | yes | Must be `moka_app`. A superuser here silently disables all tenant isolation — the process refuses to start |
+| `DATABASE_MIGRATION_URL` | yes | Must differ from `DATABASE_URL`; the owner can turn RLS off |
+| `DATABASE_SSL` | yes | `false` sends every row in the clear; boot refused |
+| `AUTH_SECRET` | yes | Session signing key, ≥32 bytes base64 |
+| `ENCRYPTION_KEY` | yes | Exactly 32 bytes base64. **Lose it and every stored credential is unrecoverable** |
+| `REDIS_URL` | yes | Boot refused without it — see the caveat in §3.6 |
+| `CORS_ORIGINS` | yes | No `localhost`, no `http://`. Wrong value = every logged-in request fails in the browser |
+| `API_HOST` | yes | Must not be `127.0.0.1`, or the service is unreachable |
+| `STORAGE_LOCAL_PATH` | yes | Must be under the mounted volume, or uploads vanish |
+| `LOG_LEVEL` | yes | `debug`/`trace` refused in production; verbose logs capture request content |
+| `DATABASE_POOL_MAX` | no | Defaults to 10. Lower it if your database plan caps connections |
+| `SEARXNG_URL` | no | Only if you self-host SearXNG for web search |
+| `BILLING_MANUAL_PAYMENTS` | no | `true` lets an admin activate a paid plan against an off-system payment |
+
+### 3.4 Run the migrations — from your machine, once
+
+Migrations are deliberately **not** in the container start command. Every replica would race to migrate on each deploy, and one failure would crash-loop the service. A migration is an operator action against a database, not a side effect of a container booting.
+
+```bash
+DATABASE_MIGRATION_URL="postgresql://moka_migrator:<MIGRATOR_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require" pnpm db:migrate
+```
+
+Then seed the roles, permissions and plan catalogue:
+
+```bash
+DATABASE_URL="postgresql://moka_app:<APP_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require" DATABASE_MIGRATION_URL="postgresql://moka_migrator:<MIGRATOR_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require" pnpm db:seed
+```
+
+Run migrations **before** the first deploy finishes, or at least before anyone uses the service. The API starts fine against an unmigrated database — readiness reports `schema: "ok"` because a database with no tables has no unprotected ones — so an empty database will not stop a deploy going live.
+
+### 3.5 Verify the deployment
+
+Railway gates the deploy on `/health/ready` (set in `railway.json`), so a version that cannot reach its database never receives traffic — the previous one keeps serving. Once it is live:
+
+```bash
+curl https://<your-service>.up.railway.app/health/ready
+```
+
+```json
+{"status":"ok","database":"ok","schema":"ok","rateLimiter":"shared"}
+```
+
+`schema` is the one to read carefully. Anything other than `ok` means an organization-scoped table is missing its row-level security — treat it as a data-exposure incident, not a health blip. `"unknown"` means the check could not run, which is not the same as passing.
+
+Then run the drill against the live database:
+
+```bash
+TEST_DATABASE_URL="postgresql://moka_app:<APP_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require" TEST_DATABASE_MIGRATION_URL="postgresql://moka_migrator:<MIGRATOR_PASSWORD>@<DB_HOST>/moka_ai?sslmode=require" pnpm test:drill
+```
+
+It asserts that RLS is enabled **and forced** on every tenant table, that the grants making the ledgers append-only survived, and that the boot guard refuses a bypassing role.
+
+### 3.6 Do not raise the replica count
+
+`railway.json` pins `"numReplicas": 1`. Two things break at two replicas, and both break quietly:
+
+- **Rate limiting.** `REDIS_URL` is required by config, but the Redis driver is still a `TODO` — only `InMemoryRateLimiter` exists. On one instance that is "per-process" and honest. On two it is half the limit an operator thinks they set.
+- **File storage.** The volume is attached to one instance. A second replica cannot see the first's uploads.
+
+Scale vertically instead until both are addressed.
+
+### 3.7 What the Dockerfile does, in one paragraph
+
+Three stages on `node:22-bookworm-slim`. The build stage installs the full workspace with `--frozen-lockfile` and runs `turbo run build --filter=@moka/api...` — the trailing `...` includes the twelve workspace dependencies, each of which resolves through its own `dist`. The runtime stage reinstalls with `--prod` from the same lockfile and copies only compiled output, so typescript, tsup, esbuild and vitest never reach the image. It runs as the non-root `node` user, cannot write to its own code, and maps Railway's `PORT` to `API_PORT` in the start command so nothing in the application has to know what Railway is. Debian rather than Alpine is deliberate: the SSRF guard supplies undici a custom DNS lookup, and musl and glibc do not resolve identically — not a difference worth introducing into a security control to save 90 MB.
 
 ---
 
@@ -184,8 +295,10 @@ Stated plainly rather than discovered after launch (§45):
 pnpm verify && pnpm test:security
 ```
 
-1. **Database.** Provision Postgres, run `infra/db/bootstrap.sql` as a superuser, then `pnpm db:migrate`.
-2. **API.** Deploy to a container host with the §5 environment. Confirm `GET /health/ready` returns `{"status":"ok","database":"ok","schema":"ok"}`. A `schema` of anything but `ok` is a data-exposure signal, not a health blip.
-3. **Web.** Import to Vercel with Root Directory `apps/web` and `NEXT_PUBLIC_API_URL` pointing at the API.
-4. **CORS.** Add the Vercel domain to the API's `CORS_ORIGINS` and restart.
-5. **Verify.** Run `pnpm test:drill` against the live database, and check that a second tenant cannot see the first's data before letting anyone real near it.
+The order is not arbitrary: the web build inlines the API's URL, and the API will not start without a database.
+
+1. **Database** (§4). Provision Postgres, run `infra/db/bootstrap.sql` as a superuser to create `moka_app` and `moka_migrator`, then `pnpm db:migrate` and `pnpm db:seed` from your machine.
+2. **API** (§3). Railway, repository root, add the `/data` volume *before* the first deploy, paste the variables from §3.3. Confirm `GET /health/ready` returns `"schema":"ok"`.
+3. **Web** (§2). Vercel, Root Directory `apps/web`, `NEXT_PUBLIC_API_URL` set to the Railway URL **before** the first build.
+4. **CORS.** Put the real Vercel domain in the API's `CORS_ORIGINS` and redeploy. Until this is done every logged-in request fails in the browser.
+5. **Verify.** `pnpm test:drill` against the live database, then create two organizations and confirm neither can see the other's data before letting anyone real near it.
