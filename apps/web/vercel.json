@@ -14,5 +14,6 @@
         }
       ]
     }
-  ]
+  ],
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- ../../apps/web ../../packages ../../pnpm-lock.yaml ../../turbo.json"
 }
