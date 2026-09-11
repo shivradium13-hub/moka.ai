@@ -251,6 +251,89 @@ describe('production hardening', () => {
     expect(problems.length).toBeGreaterThanOrEqual(6);
   });
 
+  it('defaults the session cookie to SameSite=lax', () => {
+    /*
+     * The safe default, and the one that silently breaks a split-domain
+     * deployment. Asserted so that changing the default is a deliberate act
+     * rather than a side effect.
+     */
+    expect(envSchema.parse(validEnv()).COOKIE_SAMESITE).toBe('lax');
+    expect(envSchema.parse(validEnv()).COOKIE_DOMAIN).toBeUndefined();
+  });
+
+  it('accepts SameSite=none in PRODUCTION, where Secure is set', () => {
+    // vercel.app + railway.app are cross-site, so `lax` sends no cookie at
+    // all. This is the escape hatch, and it has to exist.
+    const env = loadConfig({
+      source: validEnv({
+        NODE_ENV: 'production',
+        COOKIE_SAMESITE: 'none',
+        REDIS_URL: 'redis://v:6379',
+        DATABASE_SSL: 'true',
+        API_HOST: '0.0.0.0',
+        CORS_ORIGINS: 'https://app.example.com',
+      }),
+    });
+    expect(env.COOKIE_SAMESITE).toBe('none');
+  });
+
+  it('REFUSES SameSite=none outside production, where Secure is absent', () => {
+    /*
+     * Browsers discard a SameSite=None cookie with no Secure attribute, so the
+     * cookie is never stored and every request after login is a 401 with
+     * nothing logged — the exact failure this setting exists to cure, reached
+     * from the other direction. Refused at config load rather than discovered
+     * in a browser devtools panel.
+     */
+    expect(() => loadConfig({ source: validEnv({ COOKIE_SAMESITE: 'none' }) })).toThrow(
+      /Secure/,
+    );
+  });
+
+  it('rejects a SameSite value browsers do not implement', () => {
+    expect(() => envSchema.parse(validEnv({ COOKIE_SAMESITE: 'sometimes' }))).toThrow();
+  });
+
+  it('rejects a COOKIE_DOMAIN that no allowed origin sits under', () => {
+    /*
+     * The failure this catches is invisible from the server: the browser
+     * discards a cookie whose Domain does not match the host that set it, so
+     * login succeeds and every later request is a 401 with nothing logged.
+     */
+    const message = findProductionViolations(
+      prod({ COOKIE_DOMAIN: '.otherdomain.com', CORS_ORIGINS: 'https://app.example.com' }),
+    ).join(' ');
+    expect(message).toContain('COOKIE_DOMAIN');
+    expect(message).toContain('discard');
+  });
+
+  it('accepts a COOKIE_DOMAIN that is a parent of the app origin', () => {
+    // The arrangement worth recommending: one registrable domain, so `lax`
+    // keeps working and no CSRF trade-off is needed.
+    expect(
+      findProductionViolations(
+        prod({ COOKIE_DOMAIN: '.example.com', CORS_ORIGINS: 'https://app.example.com' }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('accepts an exact-host COOKIE_DOMAIN', () => {
+    expect(
+      findProductionViolations(
+        prod({ COOKIE_DOMAIN: 'app.example.com', CORS_ORIGINS: 'https://app.example.com' }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('does not confuse a suffix match for a domain match', () => {
+    // `evilexample.com` ends with `example.com` as a STRING but is a different
+    // domain. A naive endsWith would accept it.
+    const message = findProductionViolations(
+      prod({ COOKIE_DOMAIN: '.example.com', CORS_ORIGINS: 'https://evilexample.com' }),
+    ).join(' ');
+    expect(message).toContain('COOKIE_DOMAIN');
+  });
+
   it('applies none of these checks outside production', () => {
     expect(findProductionViolations(envSchema.parse(validEnv()))).toEqual([]);
   });

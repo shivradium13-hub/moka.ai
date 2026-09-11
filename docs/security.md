@@ -574,6 +574,22 @@ Each drill tests a control by making it fail for real — creating an unprotecte
 
 ---
 
+## CSRF, and what changes on a split domain
+
+The session cookie is `SameSite=lax` by default, which blocks CSRF by refusing to travel cross-site. That is the whole defence, and it is a good one.
+
+It cannot be used when the app and the API sit on different registrable domains — `myapp.vercel.app` calling `myapi.up.railway.app`. There, `lax` means the cookie is sent on nothing, so such a deployment must set `COOKIE_SAMESITE=none` and gives the SameSite protection up.
+
+**CORS does not replace it.** CORS decides whether a caller may *read* a response; it does not stop the request running. A simple cross-site request — a form POST, a GET — is dispatched with credentials, executes on the server, and only the response is withheld. For a route that writes, that is already too late.
+
+So `checkOrigin` (`apps/api/src/common/origin-check.ts`) refuses any state-changing request carrying an `Origin` that is not in `CORS_ORIGINS`. Browsers attach `Origin` to every cross-site request and script cannot forge it, which is what makes the check worth anything.
+
+It deliberately does not apply to safe methods, to `/public/` (the chatbot surface carries no ambient authority — its visitor token is a header, not a cookie), or to requests with no `Origin` at all, which are non-browser callers with no cookie jar to exploit. That last exemption is the stated limit of the control: it defends browser sessions, which is exactly what `SameSite` was defending.
+
+Tested in `apps/api/src/common/origin-check.test.ts`, including the lookalike origins a prefix, suffix or substring comparison would wrongly accept. Mutation-tested: relaxing the exact match to `startsWith`, and the path prefix to `includes`, each fail the suite.
+
+---
+
 ## 11. Auditing (§37)
 
 Every security-relevant action writes an immutable `audit_logs` record: actor, organization, action, resource type and ID, before and after values for mutations, request ID, IP, user agent, outcome, timestamp. Audit writes are append-only; the application role holds no `UPDATE` or `DELETE` grant on that table. Reads are organization-scoped like any other tenant data.

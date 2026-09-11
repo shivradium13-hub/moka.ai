@@ -1,7 +1,7 @@
 import { config as loadDotenv } from 'dotenv';
 import { ConfigurationError } from '@moka/core';
 import {
-  envSchema,
+  envSchemaChecked,
   findLeakyPublicVars,
   findProductionViolations,
   type Env,
@@ -42,7 +42,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Env {
     );
   }
 
-  const parsed = envSchema.safeParse(source);
+  const parsed = envSchemaChecked.safeParse(source);
   if (!parsed.success) {
     const lines = parsed.error.issues.map(
       (issue) => `  - ${issue.path.join('.') || '(root)'}: ${issue.message}`,

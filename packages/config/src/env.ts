@@ -72,6 +72,42 @@ export const envSchema = z.object({
   SESSION_TTL_SECONDS: z.coerce.number().int().min(60).default(2592000),
 
   /*
+   * Session-cookie `SameSite`, and why this has to be configurable.
+   *
+   * `lax` is the default and the safer value: the browser refuses to send the
+   * cookie on cross-site subresource requests, which blocks CSRF outright.
+   *
+   * It also silently breaks a split-domain deployment. "Same site" means the
+   * same registrable domain, so `app.example.com` and `api.example.com` are
+   * same-site and work perfectly — but `myapp.vercel.app` and
+   * `myapi.up.railway.app` are NOT, and under `lax` the browser will not send
+   * the session cookie on a single `fetch()`. Login appears to succeed and
+   * every request afterwards is a 401, with nothing in any log explaining why.
+   *
+   * `none` makes that arrangement work and requires `Secure`, which is why it
+   * is refused outside production below. It gives up the SameSite half of the
+   * CSRF defence; the Origin check on state-changing requests
+   * (apps/api/src/main.ts) is what replaces it.
+   *
+   * PREFER A SHARED PARENT DOMAIN over setting this to `none`. Putting the API
+   * on `api.yourdomain.com` and the app on `app.yourdomain.com` keeps `lax`
+   * and needs no trade-off at all.
+   */
+  COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),
+
+  /*
+   * Optional cookie `Domain`.
+   *
+   * Set it to a shared parent (`.yourdomain.com`) when the app and API are
+   * subdomains of one domain, so the cookie issued by the API is sent to it
+   * from the app's origin under `SameSite=lax`.
+   *
+   * Left unset the cookie is host-only, which is the tighter default: it is
+   * sent to exactly the host that set it and to no sibling subdomain.
+   */
+  COOKIE_DOMAIN: z.string().min(1).optional(),
+
+  /*
    * Provider keys — DEVELOPMENT ONLY.
    *
    * These are instance-wide, so every organization shares them. Phase 4
@@ -120,6 +156,31 @@ export const envSchema = z.object({
       message: 'must be an http:// or https:// URL',
     })
     .optional(),
+});
+
+/**
+ * Cross-field rules, checked in EVERY environment rather than only production.
+ *
+ * `findProductionViolations` below runs only when NODE_ENV is production. This
+ * one has to run everywhere, because the mistake it catches is a development
+ * mistake: `secure` is derived from NODE_ENV, and a `SameSite=None` cookie
+ * without `Secure` is discarded by every current browser. The cookie is never
+ * stored, every request after login is a 401, and nothing logs a reason —
+ * which is precisely the failure `COOKIE_SAMESITE` exists to fix, arrived at
+ * from the opposite direction.
+ */
+export const envSchemaChecked = envSchema.superRefine((env, ctx) => {
+  if (env.COOKIE_SAMESITE === 'none' && env.NODE_ENV !== 'production') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['COOKIE_SAMESITE'],
+      message:
+        'COOKIE_SAMESITE=none requires the Secure attribute, which is only set when ' +
+        'NODE_ENV=production. Browsers discard a SameSite=None cookie without Secure, ' +
+        'so every request after login would fail with no error explaining why. ' +
+        'In development, leave it at "lax" — localhost to localhost is same-site.',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -262,6 +323,30 @@ export function findProductionViolations(env: Env): string[] {
         'request context, and log storage is rarely protected as carefully as ' +
         'the database it describes.',
     );
+  }
+
+  /*
+   * `SameSite=None` without `Secure` is rejected by every current browser, so
+   * the cookie would simply never be stored — the same silent 401 loop the
+   * setting exists to fix, arrived at from the other direction.
+   *
+   * `secure` is derived from NODE_ENV, so inside this branch it is already
+   * true. The check below catches the remaining mistake: a cookie domain that
+   * cannot possibly match the app it is meant to be sent from.
+   */
+  if (env.COOKIE_DOMAIN) {
+    const bare = env.COOKIE_DOMAIN.replace(/^\./, '').toLowerCase();
+    const matches = env.CORS_ORIGINS.some((origin) => {
+      const host = hostOf(origin).toLowerCase();
+      return host === bare || host.endsWith(`.${bare}`);
+    });
+    if (!matches) {
+      problems.push(
+        `COOKIE_DOMAIN is "${env.COOKIE_DOMAIN}" but no origin in CORS_ORIGINS is ` +
+          'under it, so the browser would discard the session cookie and every ' +
+          'authenticated request would fail with no error explaining why.',
+      );
+    }
   }
 
   /*

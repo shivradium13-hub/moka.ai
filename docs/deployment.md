@@ -129,9 +129,31 @@ STORAGE_DRIVER=local
 STORAGE_LOCAL_PATH=/data/storage
 
 CORS_ORIGINS=https://<your-project>.vercel.app
+COOKIE_SAMESITE=none
 
 API_HOST=0.0.0.0
 ```
+
+> **`COOKIE_SAMESITE=none` is not optional for a `vercel.app` + `railway.app`
+> deployment, and getting it wrong produces the most confusing failure in this
+> whole document.**
+>
+> "Same site" means the same registrable domain. `myapp.vercel.app` and
+> `myapi.up.railway.app` are *different* sites, so under the default `lax` the
+> browser will not attach the session cookie to a single `fetch()`. Login
+> returns `201` and sets the cookie, and then every request after it is a
+> `401` — with nothing in any log explaining why, because from the server's
+> point of view the request simply arrived without a cookie.
+>
+> `none` requires `Secure`, which is why config refuses it unless
+> `NODE_ENV=production`.
+>
+> **The better fix, if you own a domain:** put the API on
+> `api.yourdomain.com` and the app on `app.yourdomain.com`, set
+> `COOKIE_DOMAIN=.yourdomain.com`, and leave `COOKIE_SAMESITE=lax`. Same site,
+> so nothing is given up. `none` trades away the SameSite half of the CSRF
+> defence; the Origin check on state-changing requests replaces it, but not
+> needing the trade at all is better than replacing it.
 
 Generate the two secrets separately — they must not be the same value:
 
@@ -157,6 +179,8 @@ What each one is for, and what happens if it is wrong:
 | `ENCRYPTION_KEY` | yes | Exactly 32 bytes base64. **Lose it and every stored credential is unrecoverable** |
 | `REDIS_URL` | yes | Boot refused without it — see the caveat in §3.6 |
 | `CORS_ORIGINS` | yes | No `localhost`, no `http://`. Wrong value = every logged-in request fails in the browser |
+| `COOKIE_SAMESITE` | yes, for split domains | `none` when the app and API are on different registrable domains. `lax` (the default) sends no cookie at all across sites |
+| `COOKIE_DOMAIN` | no | A shared parent (`.yourdomain.com`) when both sit under one domain. Refused at boot if no `CORS_ORIGINS` entry is under it |
 | `API_HOST` | yes | Must not be `127.0.0.1`, or the service is unreachable |
 | `STORAGE_LOCAL_PATH` | yes | Must be under the mounted volume, or uploads vanish |
 | `LOG_LEVEL` | yes | `debug`/`trace` refused in production; verbose logs capture request content |
@@ -201,6 +225,8 @@ TEST_DATABASE_URL="postgresql://moka_app:<APP_PASSWORD>@<DB_HOST>/moka_ai?sslmod
 ```
 
 It asserts that RLS is enabled **and forced** on every tenant table, that the grants making the ledgers append-only survived, and that the boot guard refuses a bypassing role.
+
+Then check the thing the drill cannot see — that a real browser keeps its session. Log in to the deployed web app, reload the page, and confirm you are still logged in. If the reload bounces you to the login screen, `COOKIE_SAMESITE` is wrong; nothing else produces that symptom.
 
 ### 3.6 Do not raise the replica count
 
@@ -268,6 +294,7 @@ The API refuses to start in production unless all of these hold. Each is refused
 | `REDIS_URL` | set — but see §3.2, the driver is still a TODO |
 | `API_HOST` | not `127.0.0.1` |
 | `CORS_ORIGINS` | your Vercel domain, `https://` only, no `localhost` |
+| `COOKIE_SAMESITE` | `none` for split domains; `lax` only if same registrable domain |
 | `LOG_LEVEL` | not `debug` or `trace` |
 | `ANTHROPIC_API_KEY` etc. | **unset** — per-organization credentials only |
 | `ENCRYPTION_KEY` | 32 random bytes, base64, backed up off the server |

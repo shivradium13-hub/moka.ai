@@ -8,9 +8,11 @@ import fastifyCors from '@fastify/cors';
 import fastifyHelmet from '@fastify/helmet';
 import { loadConfig } from '@moka/config';
 import { Database } from '@moka/db';
+import { MAX_DOCUMENT_BYTES } from '@moka/knowledge';
 import { AppModule } from './app.module.js';
 import { DATABASE } from './database/database.module.js';
 import { createLogger, getLogger, setRootLogger } from './common/logger.js';
+import { OriginVerdict, checkOrigin } from './common/origin-check.js';
 
 async function bootstrap(): Promise<void> {
   // Configuration is validated first: the process must fail loudly on a bad
@@ -31,7 +33,25 @@ async function bootstrap(): Promise<void> {
       return typeof inbound === 'string' && inbound.length <= 128 ? inbound : randomUUID();
     },
     trustProxy: config.NODE_ENV === 'production',
-    bodyLimit: 1_048_576, // 1 MiB
+    /*
+     * Derived from the document limit, NOT a round number.
+     *
+     * This was 1 MiB while `MAX_DOCUMENT_BYTES` was 25 MB, and the two never
+     * met: uploads arrive as base64 inside JSON, which inflates by a third, so
+     * Fastify rejected anything over ~768 KB before the handler ran. The
+     * knowledge controller's friendly "File exceeds the 25 MB limit" was
+     * unreachable, and users got a bare FST_ERR_CTP_BODY_TOO_LARGE instead.
+     *
+     * Computing it from the same constant means the two cannot drift again.
+     * The 64 KiB is for the surrounding JSON — field names, filename, mime
+     * type — so the handler's own check is what a large file actually hits.
+     *
+     * The cost is that every route now accepts a body this size rather than
+     * 1 MiB. That is the trade-off for uploads being a JSON field instead of
+     * multipart; multipart arrives with the queue-backed pipeline, and the
+     * limit should come back down to 1 MiB with it.
+     */
+    bodyLimit: Math.ceil((MAX_DOCUMENT_BYTES * 4) / 3) + 65_536,
   });
 
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {
@@ -113,7 +133,75 @@ async function bootstrap(): Promise<void> {
   // --- Cookies ---
   await app.register(fastifyCookie, {
     secret: config.AUTH_SECRET,
-    parseOptions: { httpOnly: true, sameSite: 'lax', path: '/' },
+    // Defaults for serialisation. The session cookie sets these explicitly in
+    // auth.controller.ts; keeping them in step here means a cookie added later
+    // by some other route inherits the same deployment-correct behaviour
+    // rather than a hard-coded `lax` that breaks on a split domain.
+    parseOptions: {
+      httpOnly: true,
+      sameSite: config.COOKIE_SAMESITE,
+      ...(config.COOKIE_DOMAIN ? { domain: config.COOKIE_DOMAIN } : {}),
+      path: '/',
+    },
+  });
+
+  /*
+   * --- Origin check on state-changing requests ---
+   *
+   * THIS IS WHAT MAKES `COOKIE_SAMESITE=none` SAFE TO OFFER.
+   *
+   * `SameSite=lax` blocks CSRF by refusing to send the cookie cross-site. A
+   * split-domain deployment cannot use `lax` (see @moka/config), and switching
+   * to `none` gives that protection up. Something has to replace it.
+   *
+   * CORS alone does not. CORS decides whether a caller may READ a response; it
+   * does not stop the request executing. A "simple" cross-site request — a
+   * form POST, a GET — is dispatched with credentials and runs on the server,
+   * and only the response is withheld. For a state-changing route that is too
+   * late: the write already happened.
+   *
+   * So every mutating request must carry an Origin this deployment allows.
+   * Browsers set `Origin` on all cross-site requests and cannot be talked out
+   * of it from script, which is what makes the check meaningful.
+   *
+   * Deliberately NOT applied to:
+   *   - safe methods (GET/HEAD/OPTIONS), which change nothing;
+   *   - `/public/`, the chatbot surface, which is called from customer sites we
+   *     cannot enumerate and carries NO ambient authority — its visitor token
+   *     travels in a header, so there is no cookie for a forged request to
+   *     ride on;
+   *   - requests with no Origin at all, which is curl, a mobile client or a
+   *     server-to-server call. Those carry no browser cookie jar, so they are
+   *     not the CSRF threat; rejecting them would break every non-browser
+   *     caller to defend against something that cannot happen.
+   */
+  app.getHttpAdapter().getInstance().addHook('onRequest', (request, reply, done) => {
+    const verdict = checkOrigin({
+      method: request.method,
+      url: typeof request.url === 'string' ? request.url : undefined,
+      origin: typeof request.headers.origin === 'string' ? request.headers.origin : undefined,
+      allowedOrigins: config.CORS_ORIGINS,
+    });
+
+    if (verdict !== OriginVerdict.REFUSED) {
+      done();
+      return;
+    }
+
+    getLogger().warn(
+      {
+        origin: request.headers.origin,
+        method: request.method,
+        requestId: String(request.id),
+      },
+      'refused a state-changing request from an origin that is not allowed',
+    );
+    void reply.status(403).send({
+      error: {
+        code: 'ORIGIN_NOT_ALLOWED',
+        message: 'This request did not come from an allowed origin.',
+      },
+    });
   });
 
   // Attach the request id and echo it, so a user can quote it in a report.

@@ -114,7 +114,18 @@ export class AuthController {
   @Post('logout')
   async logout(@Req() request: AuthenticatedRequest, @Res({ passthrough: true }) reply: FastifyReply) {
     if (request.sessionId) await this.sessions.revoke(request.sessionId);
-    void reply.clearCookie(SESSION_COOKIE, { path: '/' });
+    /*
+     * Cleared with the SAME attributes it was set with. A browser matches a
+     * deletion against name + domain + path; clear it with different
+     * attributes and the cookie is not removed, so "log out" leaves a live
+     * session in the browser. The session row is revoked server-side either
+     * way, but a cookie that outlives its session is exactly the kind of
+     * discrepancy nobody notices until it matters.
+     */
+    void reply.clearCookie(SESSION_COOKIE, {
+      path: '/',
+      ...(loadConfig().COOKIE_DOMAIN ? { domain: loadConfig().COOKIE_DOMAIN } : {}),
+    });
     return { ok: true };
   }
 
@@ -180,7 +191,20 @@ export class AuthController {
     void reply.setCookie(SESSION_COOKIE, token, {
       httpOnly: true, // unreadable from JavaScript
       secure: config.NODE_ENV === 'production',
-      sameSite: 'lax', // blocks cross-site form CSRF while allowing top-level navigation
+      /*
+       * Configurable, defaulting to `lax`.
+       *
+       * `lax` blocks cross-site CSRF and is correct whenever the app and the
+       * API share a registrable domain. It is ALSO what silently breaks a
+       * split-domain deployment: `myapp.vercel.app` and `myapi.up.railway.app`
+       * are cross-site, so the browser sends this cookie on no `fetch()` at
+       * all, and every request after a successful login is a 401.
+       *
+       * See COOKIE_SAMESITE in @moka/config for the trade-off and for why a
+       * shared parent domain is the better answer than `none`.
+       */
+      sameSite: config.COOKIE_SAMESITE,
+      ...(config.COOKIE_DOMAIN ? { domain: config.COOKIE_DOMAIN } : {}),
       path: '/',
       expires: expiresAt,
     });
