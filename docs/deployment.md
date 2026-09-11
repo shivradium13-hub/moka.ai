@@ -41,7 +41,15 @@ The web app is a **client**. It is useless without an API to talk to, and the AP
 
 The repo has no git remote yet. Push it somewhere Vercel can read, then import the project at [vercel.com/new](https://vercel.com/new).
 
-**Set Root Directory to `apps/web`.** This is the one setting that matters. Vercel then reads `apps/web/vercel.json`, which handles the monorepo:
+**Set Root Directory to `apps/web`.** This is the one setting that matters, and leaving it unset is the most likely reason a first deploy fails: Vercel then builds from the repository root, where there is no `next` dependency and no Next.js output where it looks for one.
+
+There is now a root `vercel.json` as a fallback so an unset Root Directory still builds — but `apps/web` remains the configuration to use, because it is the one Vercel's Next.js detection is built around.
+
+**If the build fails on the install step**, it is almost certainly the pnpm version (§2.3). Set `ENABLE_EXPERIMENTAL_COREPACK=1` in the project's environment variables: that makes Vercel honour `packageManager` through corepack instead of its own bundled pnpm.
+
+**Do not create a second Vercel project for the API.** It cannot run there — §2 and §3 say why — and a failed `api-*.vercel.app` project is a symptom of that, not a configuration problem to solve.
+
+With Root Directory set, Vercel reads `apps/web/vercel.json`:
 
 ```json
 "installCommand": "cd ../.. && pnpm install --frozen-lockfile",
