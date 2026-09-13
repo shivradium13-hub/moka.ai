@@ -1,18 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "nextjs",
-  "installCommand": "npx --yes pnpm@12.3.4 install --frozen-lockfile",
-  "buildCommand": "npx --yes pnpm@12.3.4 exec turbo run build --filter=@moka/web...",
-  "outputDirectory": "apps/web/.next",
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "Strict-Transport-Security",
-          "value": "max-age=31536000; includeSubDomains"
-        }
-      ]
-    }
-  ]
+  "installCommand": "echo 'Skipping install: this build cannot succeed. See the build step.'",
+  "buildCommand": "echo '' && echo '=====================================================================' && echo ' Vercel is building from the REPOSITORY ROOT, and this app does not' && echo ' live there. The Next.js app is apps/web.' && echo '' && echo ' Fix: Project Settings -> Build & Deployment -> Root Directory,' && echo '      set it to   apps/web   and redeploy.' && echo '' && echo ' Vercel then reads apps/web/vercel.json, which builds the workspace' && echo ' dependencies as well. See docs/deployment.md section 2.' && echo '=====================================================================' && echo '' && exit 1"
 }

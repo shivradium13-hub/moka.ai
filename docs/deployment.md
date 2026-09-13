@@ -39,11 +39,21 @@ The web app is a **client**. It is useless without an API to talk to, and the AP
 
 ### 2.2 Import the repository
 
-The repo has no git remote yet. Push it somewhere Vercel can read, then import the project at [vercel.com/new](https://vercel.com/new).
+Push the repo somewhere Vercel can read, then import the project at [vercel.com/new](https://vercel.com/new).
 
-**Set Root Directory to `apps/web`.** This is the one setting that matters, and leaving it unset is the most likely reason a first deploy fails: Vercel then builds from the repository root, where there is no `next` dependency and no Next.js output where it looks for one.
+**Set Root Directory to `apps/web`.** Project Settings → Build & Deployment → Root Directory. This is not a preference, it is a requirement, and leaving it unset is the most likely reason a first deploy fails:
 
-There is now a root `vercel.json` as a fallback so an unset Root Directory still builds — but `apps/web` remains the configuration to use, because it is the one Vercel's Next.js detection is built around.
+```
+Warning: Could not identify Next.js version, ensure it is defined as a project dependency.
+Error: No Next.js version detected. Make sure your package.json has "next" in either
+"dependencies" or "devDependencies".
+```
+
+That message sends you to look at `package.json`, which is the wrong place — the root `package.json` is a workspace manifest and correctly has no `next`. The app is in `apps/web`, and Vercel was never told to look there.
+
+There is no way to fix this from a root `vercel.json`. Vercel's Next.js builder resolves `next` from the Root Directory's `package.json` **before** any `buildCommand` runs, so a root config declaring `"framework": "nextjs"` fails during detection. Dropping `framework` avoids that error but produces something worse: a build with no Next.js builder, which deploys the static pages and silently breaks `/`, the one route that is server-rendered.
+
+So the root `vercel.json` deliberately fails on the first line with an explanation, rather than pretending to be a fallback. A build that stops and names the setting beats one that succeeds into a half-broken site.
 
 **If the build fails on the install step**, it is almost certainly the pnpm version (§2.3). Set `ENABLE_EXPERIMENTAL_COREPACK=1` in the project's environment variables: that makes Vercel honour `packageManager` through corepack instead of its own bundled pnpm.
 
