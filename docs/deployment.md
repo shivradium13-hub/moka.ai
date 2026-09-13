@@ -71,8 +71,17 @@ Only one is required:
 | Variable | Value | Notes |
 |---|---|---|
 | `NEXT_PUBLIC_API_URL` | `https://api.yourdomain.com` | The deployed API's origin. No trailing slash. |
+| `NEXT_PUBLIC_SITE_URL` | `https://yourdomain.com` | Optional. Canonical origin for `robots.txt`, `sitemap.xml` and Open Graph tags. No trailing slash. |
 
-**Set it before the first build.** `NEXT_PUBLIC_` variables are inlined at build time, so changing it later needs a redeploy, not a restart.
+**Set them before the first build.** `NEXT_PUBLIC_` variables are inlined at build time, so changing one later needs a redeploy, not a restart.
+
+`NEXT_PUBLIC_SITE_URL` is optional because `lib/site.ts` falls back to Vercel's `VERCEL_PROJECT_PRODUCTION_URL`, so a first deploy emits correct absolute urls with nothing configured rather than advertising `localhost` to a crawler. Set it explicitly once a custom domain is attached: it is the one value a domain change does not invalidate. The fallback deliberately uses the *production* url and not `VERCEL_URL`, which is per-deployment — canonicals built from that would point at a preview that stops existing.
+
+### 2.4b The public site
+
+`/`, `/product`, `/pricing` and `/security` are the marketing site and are public. The first is server-rendered because it still routes a signed-in visitor to their dashboard; the other three prerender to static HTML and are served from the CDN.
+
+`robots.txt` and `sitemap.xml` are generated from one route list in `apps/web/src/lib/site.ts`, so a page cannot appear in the sitemap while being disallowed from crawling. The application routes (`/dashboard`, `/login`, and the rest) are disallowed — they redirect anonymous requests anyway, so this is about not wasting crawl budget, not about access control.
 
 ### 2.5 The build refuses to publish secrets
 

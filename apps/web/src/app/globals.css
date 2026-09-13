@@ -8,6 +8,20 @@
   --color-accent: #4f46e5;
   --color-accent-soft: #eef2ff;
   --color-danger: #b42318;
+
+  /* Marketing surfaces. The application shell is light-only; the public site
+     inverts for a handful of bands, so those few colours are named here
+     instead of being spelled out as arbitrary values at each call site. */
+  --color-night: #0a0c12;
+  --color-night-soft: #141824;
+  --color-night-line: #252b3a;
+  --color-night-muted: #98a1b3;
+  --color-chalk: #f7f8fa;
+  --color-violet: #7c5cff;
+
+  --font-display:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 }
 
 :root {
@@ -23,7 +37,14 @@ body {
   background: #f7f8fa;
   color: var(--color-ink);
   font-family:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -31,4 +52,58 @@ body {
 :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+/*
+ * Marketing-only helpers. Each is something Tailwind cannot express as a
+ * utility composition — a gradient clip, a masked grid, a keyframe — so they
+ * live here rather than being repeated inline.
+ */
+
+.gradient-text {
+  background-image: linear-gradient(100deg, var(--color-accent), var(--color-violet) 60%, #22d3ee);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Faint graph-paper backdrop that fades out toward the edges. */
+.grid-backdrop {
+  background-image:
+    linear-gradient(to right, rgba(15, 17, 21, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 17, 21, 0.045) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+}
+
+.grid-backdrop-dark {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 70% at 50% 0%, #000 30%, transparent 100%);
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 0%, #000 30%, transparent 100%);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+/* Respect the platform setting rather than animating over it. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise {
+    animation: none;
+  }
 }
